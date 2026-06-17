@@ -1,5 +1,5 @@
 """
-Configuration — edit ONLY these fields for each new brand.
+Configuration - edit ONLY these fields for each new brand.
 
 How it works automatically:
   1. If APP_STORE_ID is set → scrapes Apple App Store reviews
@@ -11,7 +11,7 @@ How it works automatically:
 BRAND_NAME   = "Nuuly"
 KEYWORDS     = ["Nuuly clothing rental", "Nuuly subscription"]
 
-# ── App Store (leave blank if no app — auto-detects Amazon+Reddit instead) ────
+# ── App Store (leave blank if no app - auto-detects Amazon+Reddit instead) ────
 APP_STORE_ID = "1511548818"
 APP_COUNTRY  = "us"
 
