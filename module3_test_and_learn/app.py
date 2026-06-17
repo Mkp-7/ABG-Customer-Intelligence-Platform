@@ -1,5 +1,5 @@
 """
-Module 3 — Test & Learn Autopilot
+Module 3 - Test & Learn Autopilot
 """
 
 import os
@@ -63,10 +63,10 @@ def show():
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Pilot Locations** — running the new initiative")
+        st.markdown("**Pilot Locations** - running the new initiative")
         pilot_file = st.file_uploader("Upload pilot CSV", type=["csv"], key="pilot")
     with c2:
-        st.markdown("**Control Locations** — business as usual")
+        st.markdown("**Control Locations** - business as usual")
         ctrl_file = st.file_uploader("Upload control CSV", type=["csv"], key="control")
 
     if not pilot_file or not ctrl_file:
