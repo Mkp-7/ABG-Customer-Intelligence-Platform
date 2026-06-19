@@ -38,4 +38,4 @@ BUSINESSES_CSV = "data/businesses.csv"
 
 # ── Analytics Settings ────────────────────────────────────────────────────────
 ANOMALY_THRESHOLD_STARS = 0.4
-SIGNIFICANT_DELTA_STARS = 0.3
+SIGNIFICANT_DELTA_STARS = 0.15
