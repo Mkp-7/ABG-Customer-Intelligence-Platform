@@ -142,14 +142,17 @@ def serpapi_get(params):
 
 
 def scrape_location_reviews(keyword, max_locations=3, max_pages=2):
-    """Search Google Maps for keyword, scrape reviews with full location metadata."""
+    """Search Google Maps for keyword, scrape reviews with full location metadata.
+    Returns (reviews_list, api_calls_made)."""
     reviews = []
+    calls = 0
     try:
         data    = serpapi_get({"engine": "google_maps", "q": keyword, "type": "search"})
+        calls += 1
         results = data.get("local_results", [])
 
         if not results:
-            return []
+            return [], calls
 
         for place in results[:max_locations]:
             data_id       = place.get("data_id", "")
@@ -178,6 +181,7 @@ def scrape_location_reviews(keyword, max_locations=3, max_pages=2):
 
                 try:
                     rdata = serpapi_get(params)
+                    calls += 1
                     raw   = rdata.get("reviews", [])
                     if not raw:
                         break
@@ -222,7 +226,7 @@ def scrape_location_reviews(keyword, max_locations=3, max_pages=2):
     except Exception as ex:
         print(f"   Error for '{keyword}': {ex}")
 
-    return reviews
+    return reviews, calls
 
 
 def scrape_serpapi():
@@ -240,19 +244,25 @@ def scrape_serpapi():
         for state in US_STATES:
             search_terms.append(f"{kw} {state}")
 
-    print(f"   Searching {len(search_terms)} state-targeted queries (capped for API budget)...")
+    print(f"   Searching state-targeted queries (capped for API budget)...")
 
     queries_run = 0
-    max_queries = 40  # stay within free tier budget
+    max_queries = 12     # 12 searches × 1 call = 12 calls
+    api_calls_used = 0
+    max_api_calls  = 90  # stay safely under 100/month free tier
 
     for term in search_terms:
         if queries_run >= max_queries:
             break
-        if len(all_reviews) >= 500:
+        if api_calls_used >= max_api_calls:
+            print(f"   ⚠️  Approaching API budget limit ({api_calls_used} calls) - stopping early.")
+            break
+        if len(all_reviews) >= 300:
             break
 
-        reviews = scrape_location_reviews(term, max_locations=2, max_pages=2)
+        reviews, calls_made = scrape_location_reviews(term, max_locations=1, max_pages=1)
         queries_run += 1
+        api_calls_used += calls_made
 
         for r in reviews:
             if r["review_id"] not in seen_ids:
@@ -261,7 +271,7 @@ def scrape_serpapi():
 
         time.sleep(0.3)
 
-    print(f"\n   ✅ Google Maps: {len(all_reviews)} unique reviews from {queries_run} queries")
+    print(f"\n   ✅ Google Maps: {len(all_reviews)} unique reviews from {queries_run} queries ({api_calls_used} API calls used)")
 
     if all_reviews:
         states_found = set(r["state"] for r in all_reviews if r["state"])
