@@ -221,22 +221,13 @@ def show():
 
     # ── Raw reviews ───────────────────────────────────────────────────────────
     if st.checkbox("Show raw reviews"):
-            cols = [c for c in ["date","stars","version","title","text","place_name","city","state","source"] if c in filtered.columns]
-            display = filtered[cols].sort_values("date", ascending=False).head(200).copy()
-            st.dataframe(
-                display,
-                column_config={
-                    "date":       st.column_config.DateColumn("Date"),
-                    "stars":      st.column_config.NumberColumn("Rating ⭐", format="%.1f"),
-                    "text":       st.column_config.TextColumn("Review", width="large"),
-                    "title":      st.column_config.TextColumn("Title"),
-                    "version":    st.column_config.TextColumn("Version"),
-                    "place_name": st.column_config.TextColumn("Location"),
-                    "city":       st.column_config.TextColumn("City"),
-                    "state":      st.column_config.TextColumn("State"),
-                    "source":     st.column_config.TextColumn("Source"),
-                },
-                use_container_width=True,
-                hide_index=True,
-                height=500,
-            )
+        cols = [c for c in ["date","stars","version","title","text"] if c in filtered.columns]
+        st.dataframe(
+            filtered[cols].sort_values("date", ascending=False).head(200),
+            column_config={
+                "text": st.column_config.TextColumn("Review", width="large"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=500,
+        )
