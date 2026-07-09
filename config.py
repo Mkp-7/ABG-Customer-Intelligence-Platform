@@ -3,21 +3,18 @@ Configuration - edit ONLY these fields for each new brand.
 """
 
 # ── Brand Settings ──────────────────────────────────────────────────────────
-BRAND_NAME   = "Pandora Jewelry"
+BRAND_NAME   = "Charlotte Tilbury"
 APP_NAME     = BRAND_NAME
 KEYWORDS     = [
-    "Pandora Jewelry store",
-    "Pandora jewelry outlet",
+    "Charlotte Tilbury store",
+    "Charlotte Tilbury beauty",
 ]
-
-# ── App Store (leave blank - auto-discovery will skip cleanly) ──────────────
-APP_STORE_ID = ""
+APP_STORE_ID = ""          # auto-discovery will find their app
 APP_COUNTRY  = "us"
 
-# ── Platform Branding ─────────────────────────────────────────────────────────
-PLATFORM_TITLE    = "Pandora Jewelry Intelligence Platform"
-PLATFORM_SUBTITLE = "Customer Insights & Operations"
-PLATFORM_ICON     = "💍"
+PLATFORM_TITLE    = "Charlotte Tilbury Intelligence Platform"
+PLATFORM_SUBTITLE = "Customer Insights & Beauty Analytics"
+PLATFORM_ICON     = "💄"
 
 # ── AI Model ──────────────────────────────────────────────────────────────────
 GROQ_MODEL = "llama-3.3-70b-versatile"
