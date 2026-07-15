@@ -3,18 +3,19 @@ Configuration - edit ONLY these fields for each new brand.
 """
 
 # ── Brand Settings ──────────────────────────────────────────────────────────
-BRAND_NAME   = "Charlotte Tilbury"
+BRAND_NAME   = "Avis Budget Group"
 APP_NAME     = BRAND_NAME
 KEYWORDS     = [
-    "Charlotte Tilbury store",
-    "Charlotte Tilbury beauty",
+    "Avis car rental",
+    "Budget car rental",
+    "Zipcar",
 ]
 APP_STORE_ID = ""          # auto-discovery will find their app
 APP_COUNTRY  = "us"
 
-PLATFORM_TITLE    = "Charlotte Tilbury Intelligence Platform"
-PLATFORM_SUBTITLE = "Customer Insights & Beauty Analytics"
-PLATFORM_ICON     = "💄"
+PLATFORM_TITLE    = "ABG Intelligence Platform"
+PLATFORM_SUBTITLE = "Customer Experience & Operations Analytics"
+PLATFORM_ICON     = "🚗"
 
 # ── AI Model ──────────────────────────────────────────────────────────────────
 GROQ_MODEL = "llama-3.3-70b-versatile"
