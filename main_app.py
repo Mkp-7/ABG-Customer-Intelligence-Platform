@@ -1,343 +1,358 @@
 """
-Retail Intelligence Platform - main entry point.
-Run with: streamlit run main_app.py
+Module 2 - Store Pulse Map
 """
 
-import streamlit as st
 import os
 import sys
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from config import PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON, BRANDS, BUSINESSES_CSV
+from config import REVIEWS_CSV, BUSINESSES_CSV, PEER_GROUP_COLUMN, SIGNIFICANT_DELTA_STARS
 
-st.set_page_config(
-    page_title=PLATFORM_TITLE,
-    page_icon=PLATFORM_ICON,
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+def add_jitter(series: pd.Series, amount: float = 0.018) -> pd.Series:
+    """Add tiny random offset so overlapping pins separate visually."""
+    np.random.seed(42)
+    return series + np.random.uniform(-amount, amount, size=len(series))
 
-section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
-    border-right: 1px solid #334155;
-}
-section[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-section[data-testid="stSidebar"] .stRadio label {
-    color: #94a3b8 !important;
-    font-size: 13px !important;
-    padding: 6px 0 !important;
-}
 
-.hero-container {
-    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #0f172a 100%);
-    border-radius: 24px;
-    padding: 48px 40px;
-    margin-bottom: 32px;
-    border: 1px solid #1e40af33;
-}
-.hero-title {
-    font-size: 38px;
-    font-weight: 700;
-    background: linear-gradient(135deg, #60a5fa, #a78bfa, #34d399);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin-bottom: 12px;
-    line-height: 1.2;
-}
-.hero-sub { font-size: 16px; color: #94a3b8; line-height: 1.7; max-width: 600px; }
+def load_and_process(brand_id: str = None):
+    if not os.path.exists(BUSINESSES_CSV):
+        return None, None
 
-.kpi-row { display: flex; gap: 16px; margin-top: 32px; flex-wrap: wrap; }
-.kpi-box {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid #334155;
-    border-radius: 14px;
-    padding: 18px 24px;
-    min-width: 140px;
-}
-.kpi-num { font-size: 26px; font-weight: 700; color: #60a5fa; }
-.kpi-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px; }
+    biz     = pd.read_csv(BUSINESSES_CSV)
+    reviews = None
 
-.module-card {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    border: 1px solid #334155;
-    border-radius: 16px;
-    padding: 22px 22px 14px 22px;
-    margin-bottom: 4px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.2s;
-}
-.module-card:hover { border-color: #3b82f6; }
-.module-card .icon { font-size: 28px; margin-bottom: 10px; display: block; }
-.module-card .title { font-size: 15px; font-weight: 600; color: #f1f5f9; margin-bottom: 6px; }
-.module-card .desc { font-size: 12px; color: #94a3b8; line-height: 1.6; margin-bottom: 12px; }
-.module-card .badge {
-    position: absolute; top: 14px; right: 14px;
-    font-size: 9px; font-weight: 700;
-    padding: 3px 8px; border-radius: 20px; letter-spacing: 0.06em; color: white;
-}
+    if brand_id and "brand_id" in biz.columns:
+        biz = biz[biz["brand_id"] == brand_id]
 
-[data-testid="stMetric"] {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 12px;
-    padding: 16px !important;
-}
-[data-testid="stMetricLabel"] { color: #94a3b8 !important; font-size: 12px !important; }
-[data-testid="stMetricValue"] { color: #f1f5f9 !important; font-size: 24px !important; }
+    if os.path.exists(REVIEWS_CSV):
+        reviews = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+        reviews["stars"] = pd.to_numeric(reviews["stars"], errors="coerce")
+        if brand_id and "brand_id" in reviews.columns:
+            reviews = reviews[reviews["brand_id"] == brand_id]
 
-.main .block-container { background: #0b1120; padding-top: 2rem; }
-.stApp { background: #0b1120; }
+        agg = (reviews.groupby("business_id")["stars"]
+               .agg(avg_rating="mean", review_count="count")
+               .reset_index())
 
-.stButton button {
-    background: linear-gradient(135deg, #2563eb, #7c3aed) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 500 !important;
-}
-.stButton button:hover { opacity: 0.88 !important; }
+        if "review_count" in biz.columns:
+            biz = biz.drop(columns=["review_count"])
 
-h1, h2, h3 { color: #f1f5f9 !important; }
-p, li { color: #cbd5e1; }
-hr { border-color: #1e293b !important; }
+        biz = biz.merge(agg, on="business_id", how="left")
+        biz["avg_rating"]   = biz["avg_rating"].fillna(biz["stars"])
+        biz["review_count"] = biz["review_count"].fillna(0).astype(int)
+    else:
+        biz["avg_rating"]   = biz["stars"]
+        biz["review_count"] = 0
 
-.brand-block {
-    text-align: center;
-    padding: 20px 0 20px;
-    border-bottom: 1px solid #334155;
-    margin-bottom: 12px;
-}
-.brand-icon { font-size: 32px; }
-.brand-title { font-size: 14px; font-weight: 600; color: #f1f5f9; margin-top: 6px; }
-.brand-sub { font-size: 11px; color: #64748b; margin-top: 2px; }
-</style>
-""", unsafe_allow_html=True)
+    biz = biz.dropna(subset=["latitude", "longitude", "avg_rating"])
+    biz["avg_rating"] = pd.to_numeric(biz["avg_rating"], errors="coerce")
+    biz = biz.dropna(subset=["avg_rating"])
 
-# ── Page routing via query params (enables direct navigation) ─────────────────
-PAGES = {
-    "home":    "🏠  Home",
-    "voc":     "🗣️  Voice of Customer AI",
-    "map":     "🗺️  Store Pulse Map",
-    "test":    "🧪  Test & Learn Autopilot",
-    "copilot": "🤖  Analyst Copilot",
-}
-PAGE_OPTIONS = list(PAGES.values())
+    peer_col = PEER_GROUP_COLUMN if PEER_GROUP_COLUMN in biz.columns else "state"
+    biz["peer_avg"] = biz.groupby(peer_col)["avg_rating"].transform("mean")
+    biz["vs_peer"]  = (biz["avg_rating"] - biz["peer_avg"]).round(2)
 
-# Read current page from query param
-params   = st.query_params
-cur_page = params.get("page", "home")
-if cur_page not in PAGES:
-    cur_page = "home"
-default_idx = list(PAGES.keys()).index(cur_page)
+    delta = SIGNIFICANT_DELTA_STARS
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown(f"""
-    <div class="brand-block">
-        <div class="brand-icon">{PLATFORM_ICON}</div>
-        <div class="brand-title">{PLATFORM_TITLE}</div>
-        <div class="brand-sub">{PLATFORM_SUBTITLE}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    def status(d):
+        if d >= delta:  return "Above Peer"
+        if d <= -delta: return "Below Peer"
+        return "On Par"
 
-    selected = st.radio(
-        "nav",
-        options=PAGE_OPTIONS,
-        index=default_idx,
-        label_visibility="collapsed",
+    biz["status"] = biz["vs_peer"].apply(status)
+
+    # Store original lat/lon for tooltip, jitter display coords
+    biz["lat_display"] = add_jitter(biz["latitude"])
+    biz["lon_display"] = add_jitter(biz["longitude"])
+
+    biz["label"] = (biz.get("name", biz["business_id"]).astype(str)
+                    + "<br>" + biz.get("address", "").astype(str)
+                    + "<br>" + biz.get("city", "").astype(str)
+                    + ", " + biz.get("state", "").astype(str))
+
+    biz["short_label"] = (biz.get("city", "").astype(str)
+                          + ", " + biz.get("state", "").astype(str)
+                          + "  " + biz["avg_rating"].round(1).astype(str) + "⭐")
+
+    return biz, reviews
+
+
+def show():
+    brand_id   = st.session_state.get("selected_brand_id")
+    brand_name = st.session_state.get("selected_brand_name", "All Brands")
+
+    st.markdown(f"## 🗺️ Store Pulse Map - {brand_name}")
+    st.markdown(
+        "Every location benchmarked against its **state peer group**. "
+        "🔴 Below peer · 🟡 On par · 🟢 Above peer - "
+        "pins are slightly spread so overlapping stores are visible individually."
     )
 
-    # Sync sidebar selection → query param
-    selected_key = [k for k, v in PAGES.items() if v == selected][0]
-    if selected_key != cur_page:
-        st.query_params["page"] = selected_key
-        st.rerun()
+    biz, reviews = load_and_process(brand_id)
 
-    # ── Brand selector ────────────────────────────────────────────────────────
-    import pandas as pd
+    if biz is None or len(biz) == 0:
+        st.error("No location data found. Run:\n"
+                 "```\npython module1_voice_of_customer/01_extract_reviews.py\n```")
+        return
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+    st.sidebar.markdown("### 🗺️ Map Filters")
+    states = sorted(biz["state"].dropna().unique()) if "state" in biz.columns else []
+    sel_states = st.sidebar.multiselect("States", options=states, default=states)
+
+    sel_status = st.sidebar.multiselect(
+        "Status",
+        options=["Above Peer", "On Par", "Below Peer"],
+        default=["Above Peer", "On Par", "Below Peer"],
+    )
+    min_rev = st.sidebar.slider("Min reviews per location", 1, 30, 1)
+
+    view_mode = st.sidebar.radio(
+        "Map view",
+        options=["📍 Individual pins (jittered)", "🔵 Cluster mode"],
+        index=0,
+    )
+
+    # ── Filter ────────────────────────────────────────────────────────────────
+    mask = biz["status"].isin(sel_status) & (biz["review_count"] >= min_rev)
+    if sel_states:
+        mask &= biz["state"].isin(sel_states)
+    filtered = biz[mask].copy()
+
+    if filtered.empty:
+        st.warning("No locations match filters. Try lowering the min reviews slider.")
+        return
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("Locations",     len(filtered))
+    c2.metric("Avg Rating",    f"{filtered['avg_rating'].mean():.2f} ⭐")
+    c3.metric("Total Reviews", f"{int(filtered['review_count'].sum()):,}")
+    c4.metric("States",        filtered["state"].nunique() if "state" in filtered.columns else "-")
+    c5.metric("🔴 Below Peer", int((filtered["status"]=="Below Peer").sum()))
+    c6.metric("🟢 Above Peer", int((filtered["status"]=="Above Peer").sum()))
+
     st.markdown("---")
-    st.markdown("<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>Brand</div>", unsafe_allow_html=True)
 
-    brand_options = {b["name"]: b["brand_id"] for b in BRANDS}
+    color_map = {"Above Peer":"#1D9E75","On Par":"#F59E0B","Below Peer":"#E24B4A"}
 
-    # Only show brands that actually have data loaded
-    if os.path.exists(BUSINESSES_CSV):
-        try:
-            loaded_brands = pd.read_csv(BUSINESSES_CSV)["brand_id"].unique().tolist()
-            brand_options = {b["name"]: b["brand_id"] for b in BRANDS if b["brand_id"] in loaded_brands}
-        except Exception:
-            pass
+    # ── Map ───────────────────────────────────────────────────────────────────
+    if "Cluster" in view_mode:
+        # Cluster mode: one trace per status, use cluster marker
+        fig = go.Figure()
+        for status_val, color in color_map.items():
+            sub = filtered[filtered["status"] == status_val]
+            if sub.empty:
+                continue
+            fig.add_trace(go.Scattermapbox(
+                lat=sub["lat_display"],
+                lon=sub["lon_display"],
+                mode="markers",
+                marker=go.scattermapbox.Marker(
+                    size=14,
+                    color=color,
+                    opacity=0.85,
+                ),
+                cluster=dict(
+                    enabled=True,
+                    color=color,
+                    size=20,
+                    step=3,
+                ),
+                text=sub["label"],
+                customdata=np.stack([
+                    sub["avg_rating"].round(2),
+                    sub["peer_avg"].round(2),
+                    sub["vs_peer"],
+                    sub["review_count"],
+                    sub.get("city", sub["business_id"]),
+                    sub.get("state", ""),
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
+                    "Rating: %{customdata[0]}⭐<br>"
+                    "State avg: %{customdata[1]}⭐<br>"
+                    "vs Peers: %{customdata[2]:+.2f}⭐<br>"
+                    "Reviews: %{customdata[3]}<extra></extra>"
+                ),
+                name=status_val,
+            ))
 
-    if brand_options:
-        selected_brand_name = st.radio(
-            "brand_selector",
-            options=list(brand_options.keys()),
-            index=0,
-            label_visibility="collapsed",
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            mapbox_zoom=3.5,
+            mapbox_center={"lat":37.5,"lon":-96},
+            height=560,
+            margin=dict(l=0,r=0,t=0,b=0),
+            legend=dict(title="vs State Peers", bgcolor="rgba(255,255,255,0.9)"),
+            dragmode="zoom",
         )
-        st.session_state["selected_brand_id"]   = brand_options[selected_brand_name]
-        st.session_state["selected_brand_name"] = selected_brand_name
+
     else:
-        st.caption("No brand data loaded yet.")
-        st.session_state["selected_brand_id"]   = None
-        st.session_state["selected_brand_name"] = "All"
+        # Individual jittered pins - sized by review count, colored by status
+        filtered["marker_size"] = np.clip(
+            8 + (filtered["review_count"] / filtered["review_count"].max()) * 14,
+            8, 22
+        )
 
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    if not groq_key:
-        st.markdown("---")
-        st.warning("⚠️ Add GROQ_API_KEY to a `.env` file.\nFree key: console.groq.com")
+        fig = go.Figure()
+        for status_val, color in color_map.items():
+            sub = filtered[filtered["status"] == status_val]
+            if sub.empty:
+                continue
+            fig.add_trace(go.Scattermapbox(
+                lat=sub["lat_display"],
+                lon=sub["lon_display"],
+                mode="markers+text",
+                marker=go.scattermapbox.Marker(
+                    size=sub["marker_size"],
+                    color=color,
+                    opacity=0.88,
+                ),
+                text=sub["avg_rating"].round(1).astype(str) + "⭐",
+                textposition="top right",
+                textfont=dict(size=9, color="#333"),
+                customdata=np.stack([
+                    sub["avg_rating"].round(2),
+                    sub["peer_avg"].round(2),
+                    sub["vs_peer"],
+                    sub["review_count"],
+                    sub.get("city", sub["business_id"]),
+                    sub.get("state", ""),
+                    sub.get("address", ""),
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
+                    "%{customdata[6]}<br>"
+                    "──────────────<br>"
+                    "⭐ Rating:      <b>%{customdata[0]}</b><br>"
+                    "📊 State avg:   %{customdata[1]}<br>"
+                    "📈 vs Peers:    <b>%{customdata[2]:+.2f}</b><br>"
+                    "💬 Reviews:     %{customdata[3]}<extra></extra>"
+                ),
+                name=status_val,
+            ))
 
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            mapbox_zoom=3.8,
+            mapbox_center={"lat":37.5,"lon":-96},
+            height=560,
+            margin=dict(l=0,r=0,t=0,b=0),
+            legend=dict(title="vs State Peers", bgcolor="rgba(255,255,255,0.9)"),
+            dragmode="zoom",
+        )
 
-def nav_to(page_key: str):
-    """Navigate to a page by setting query param and rerunning."""
-    st.query_params["page"] = page_key
-    st.rerun()
+    st.plotly_chart(fig, use_container_width=True, config={
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+        "toImageButtonOptions": {"format": "png", "filename": "store_pulse_map"},
+    })
+    st.caption("💡 Tip: Pins are slightly spread so overlapping stores are individually visible. "
+               "Hover for full address and rating details. Switch to Cluster mode in the sidebar to see density.")
 
+    # ── Attention table ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🔴 Locations Needing Most Attention")
+    st.caption("Stores furthest below their state peer average - priority Field Leader calls.")
 
-# ── Load home KPI data ────────────────────────────────────────────────────────
-def load_home_kpis():
-    import pandas as pd
-    kpis = {}
-    rev_path = os.path.join(BASE_DIR, "data", "reviews.csv")
-    biz_path = os.path.join(BASE_DIR, "data", "businesses.csv")
+    disp_cols = [c for c in ["short_label","state","avg_rating","peer_avg","vs_peer","review_count"] if c in filtered.columns]
+    bottom = (filtered[filtered["status"]=="Below Peer"]
+              .sort_values("vs_peer")[disp_cols].head(15).copy())
 
-    if os.path.exists(rev_path):
-        rev = pd.read_csv(rev_path, parse_dates=["date"])
-        rev["stars"] = pd.to_numeric(rev["stars"], errors="coerce")
-        kpis["total_reviews"]   = len(rev)
-        kpis["avg_rating"]      = round(rev["stars"].mean(), 2)
-        kpis["pct_negative"]    = round((rev["stars"] <= 2).mean() * 100, 1)
-        kpis["pct_positive"]    = round((rev["stars"] >= 4).mean() * 100, 1)
-        kpis["unique_locations"]= rev["business_id"].nunique()
-        if "date" in rev.columns and not rev["date"].isna().all():
-            kpis["date_min"] = rev["date"].min().strftime("%b %Y")
-            kpis["date_max"] = rev["date"].max().strftime("%b %Y")
-        else:
-            kpis["date_min"] = kpis["date_max"] = "N/A"
+    if bottom.empty:
+        st.success("✅ No locations significantly below their state peer group.")
     else:
-        kpis = None
+        for col in ["avg_rating","peer_avg","vs_peer"]:
+            if col in bottom.columns:
+                bottom[col] = bottom[col].round(2)
+        st.dataframe(bottom, column_config={
+            "short_label":  st.column_config.TextColumn("Location"),
+            "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
+            "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
+            "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=-2, max_value=0, format="%.2f ⭐"),
+            "review_count": st.column_config.NumberColumn("Reviews"),
+        }, use_container_width=True, hide_index=True)
 
-    if os.path.exists(biz_path):
-        biz = pd.read_csv(biz_path)
-        kpis = kpis or {}
-        kpis["states"] = biz["state"].nunique() if "state" in biz.columns else "N/A"
-    return kpis
+    # ── Top performers ────────────────────────────────────────────────────────
+    st.markdown("### 🟢 Top Performing Locations")
+    st.caption("Best-practice targets - stores significantly outperforming their state peers.")
 
+    top = (filtered[filtered["status"]=="Above Peer"]
+           .sort_values("vs_peer", ascending=False)[disp_cols].head(15).copy())
 
-# ── Pages ─────────────────────────────────────────────────────────────────────
-if cur_page == "home":
-
-    kpis = load_home_kpis()
-
-    # Hero
-    if kpis:
-        hero_reviews  = f"{kpis['total_reviews']:,}"
-        hero_locs     = str(kpis.get("unique_locations", "-"))
-        hero_states   = str(kpis.get("states", "-"))
-        hero_period   = f"{kpis.get('date_min','-')} – {kpis.get('date_max','-')}"
-        hero_avg      = str(kpis.get("avg_rating", "-"))
-        hero_neg      = f"{kpis.get('pct_negative','-')}%"
-        hero_pos      = f"{kpis.get('pct_positive','-')}%"
+    if top.empty:
+        st.info("No locations significantly above peer group with current filters.")
     else:
-        hero_reviews = hero_locs = hero_states = hero_period = "-"
-        hero_avg = hero_neg = hero_pos = "-"
+        for col in ["avg_rating","peer_avg","vs_peer"]:
+            if col in top.columns:
+                top[col] = top[col].round(2)
+        st.dataframe(top, column_config={
+            "short_label":  st.column_config.TextColumn("Location"),
+            "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
+            "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
+            "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=0, max_value=2, format="+%.2f ⭐"),
+            "review_count": st.column_config.NumberColumn("Reviews"),
+        }, use_container_width=True, hide_index=True)
 
-    st.markdown(f"""
-    <div class="hero-container">
-        <div class="hero-title">Customer Intelligence<br>Operating System</div>
-        <div class="hero-sub">
-            Real customer reviews. AI-powered analysis. Instant decisions for Store Operations leaders.
-        </div>
-        <div class="kpi-row">
-            <div class="kpi-box">
-                <div class="kpi-num">{hero_reviews}</div>
-                <div class="kpi-label">Reviews Loaded</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num">{hero_locs}</div>
-                <div class="kpi-label">Store Locations</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num">{hero_states}</div>
-                <div class="kpi-label">States Covered</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num" style="color:#34d399;">{hero_avg} ⭐</div>
-                <div class="kpi-label">Chain Avg Rating</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num" style="color:#f87171;">{hero_neg}</div>
-                <div class="kpi-label">1-2 Star Reviews</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num" style="color:#34d399;">{hero_pos}</div>
-                <div class="kpi-label">4-5 Star Reviews</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-num" style="font-size:18px;">{hero_period}</div>
-                <div class="kpi-label">Data Period</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── State bar chart ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📊 Average Rating by State")
 
-    if not kpis:
-        st.warning("No data loaded yet. Run: `python module1_voice_of_customer/01_extract_reviews.py`")
+    if "state" in filtered.columns:
+        sa = (filtered.groupby("state")
+              .agg(avg_rating=("avg_rating","mean"), locations=("business_id","count"))
+              .sort_values("avg_rating", ascending=False).reset_index())
+        sa["avg_rating"] = sa["avg_rating"].round(2)
+        chain_avg = filtered["avg_rating"].mean()
 
-    st.markdown("### 🚀 Choose a Module")
+        fig2 = px.bar(
+            sa, x="state", y="avg_rating",
+            color="avg_rating",
+            color_continuous_scale=["#E24B4A","#F59E0B","#1D9E75"],
+            range_color=[2.0, 4.5],
+            text="avg_rating",
+            hover_data={"locations":True},
+            labels={"state":"State","avg_rating":"Avg Rating"},
+        )
+        fig2.add_hline(y=chain_avg, line_dash="dot", line_color="#60a5fa",
+                       annotation_text=f"Chain avg: {chain_avg:.2f} ⭐",
+                       annotation_position="top right")
+        fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig2.update_layout(
+            height=360,
+            margin=dict(l=0,r=0,t=20,b=0),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-    modules = [
-        ("🗣️", "Voice of Customer AI",
-         "Groq AI reads every review, clusters themes, flags anomaly stores, and writes the exec summary. What used to take 3 days takes 30 seconds.",
-         "AI POWERED", "#3b82f6", "voc"),
-        ("🗺️", "Store Pulse Map",
-         "Interactive map benchmarking every location vs its state peer group. Red stores need a Field Leader call this week.",
-         "LIVE MAP", "#10b981", "map"),
-        ("🧪", "Test & Learn Autopilot",
-         "Upload pilot vs control CSVs. Instant t-test, effect size, and a verdict: scale it, kill it, or keep watching.",
-         "STATISTICS", "#8b5cf6", "test"),
-        ("🤖", "Analyst Copilot",
-         "Plain-English chat. Ask 'Which states are trending down?' and get a real answer with numbers - no SQL needed.",
-         "AI CHAT", "#f59e0b", "copilot"),
-    ]
-
-    col1, col2 = st.columns(2)
-    for i, (icon, name, desc, badge, color, page_key) in enumerate(modules):
-        col = col1 if i % 2 == 0 else col2
-        with col:
-            st.markdown(f"""
-            <div class="module-card">
-                <span class="badge" style="background:{color};">{badge}</span>
-                <span class="icon">{icon}</span>
-                <div class="title">{name}</div>
-                <div class="desc">{desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button(f"Open {name} →", key=f"nav_{i}", use_container_width=True):
-                nav_to(page_key)
-
-elif cur_page == "voc":
-    from module1_voice_of_customer.app import show
-    show()
-
-elif cur_page == "map":
-    from module2_store_pulse_map.app import show
-    show()
-
-elif cur_page == "test":
-    from module3_test_and_learn.app import show
-    show()
-
-elif cur_page == "copilot":
-    from module4_analyst_copilot.app import show
-    show()
+    # ── Rating over time ──────────────────────────────────────────────────────
+    if reviews is not None:
+        st.markdown("### 📈 Rating Trend Over Time")
+        biz_ids = filtered["business_id"].tolist()
+        rev_f = reviews[reviews["business_id"].isin(biz_ids)].copy()
+        if not rev_f.empty and "date" in rev_f.columns:
+            monthly = (rev_f.set_index("date")["stars"]
+                       .resample("ME").mean().reset_index())
+            monthly.columns = ["Month","Avg Rating"]
+            fig3 = px.line(monthly, x="Month", y="Avg Rating", line_shape="spline")
+            fig3.update_traces(line_color="#60a5fa", line_width=2.5)
+            fig3.update_layout(
+                height=240,
+                margin=dict(l=0,r=0,t=10,b=0),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(range=[1,5]),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
