@@ -1,281 +1,303 @@
 """
 Module 2 - Store Pulse Map
-Shows real store locations on a map when Google Maps data is available.
-Falls back to version/trend analysis for App Store data.
 """
 
-import os, sys
-import pandas as pd
+import os
+import sys
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
-from config import REVIEWS_CSV, BUSINESSES_CSV, BRAND_NAME, SIGNIFICANT_DELTA_STARS
+
+from config import REVIEWS_CSV, BUSINESSES_CSV, PEER_GROUP_COLUMN, SIGNIFICANT_DELTA_STARS
 
 
-def load_data():
-    if not os.path.exists(REVIEWS_CSV):
-        return None
-    df = pd.read_csv(REVIEWS_CSV)
-    df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df
+def add_jitter(series: pd.Series, amount: float = 0.018) -> pd.Series:
+    """Add tiny random offset so overlapping pins separate visually."""
+    np.random.seed(42)
+    return series + np.random.uniform(-amount, amount, size=len(series))
 
 
-def has_location_data(df):
-    return (
-        "latitude" in df.columns and
-        "longitude" in df.columns and
-        df["latitude"].notna().any() and
-        df["longitude"].notna().any() and
-        df["latitude"].astype(str).str.strip().ne("").any()
-    )
+def load_and_process(brand_id: str = None):
+    if not os.path.exists(BUSINESSES_CSV):
+        return None, None
 
+    biz     = pd.read_csv(BUSINESSES_CSV)
+    reviews = None
 
-def build_location_stats(df):
-    df = df.copy()
-    df["latitude"]  = pd.to_numeric(df["latitude"],  errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df = df.dropna(subset=["latitude", "longitude", "stars"])
+    if brand_id and "brand_id" in biz.columns:
+        biz = biz[biz["brand_id"] == brand_id]
 
-    if df.empty:
-        return pd.DataFrame()
+    if os.path.exists(REVIEWS_CSV):
+        reviews = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+        reviews["stars"] = pd.to_numeric(reviews["stars"], errors="coerce")
+        if brand_id and "brand_id" in reviews.columns:
+            reviews = reviews[reviews["brand_id"] == brand_id]
 
-    agg = (df.groupby(["place_name", "address", "city", "state", "latitude", "longitude"], dropna=False)
-              .agg(avg_rating=("stars", "mean"),
-                   review_count=("stars", "count"),
-                   pct_negative=("stars", lambda x: (x <= 2).mean() * 100))
-              .reset_index())
+        agg = (reviews.groupby("business_id")["stars"]
+               .agg(avg_rating="mean", review_count="count")
+               .reset_index())
 
-    agg["avg_rating"]   = agg["avg_rating"].round(2)
-    agg["pct_negative"] = agg["pct_negative"].round(1)
+        if "review_count" in biz.columns:
+            biz = biz.drop(columns=["review_count"])
 
-    # Peer benchmark by state - fallback to overall mean if state missing
-    if "state" in agg.columns and agg["state"].astype(str).str.strip().ne("").any():
-        state_means = agg.groupby("state")["avg_rating"].transform("mean")
-        agg["peer_avg"] = state_means.round(2)
+        biz = biz.merge(agg, on="business_id", how="left")
+        biz["avg_rating"]   = biz["avg_rating"].fillna(biz["stars"])
+        biz["review_count"] = biz["review_count"].fillna(0).astype(int)
     else:
-        overall_mean = float(agg["avg_rating"].mean())
-        agg["peer_avg"] = round(overall_mean, 2)
+        biz["avg_rating"]   = biz["stars"]
+        biz["review_count"] = 0
 
-    agg["vs_peer"] = (agg["avg_rating"] - agg["peer_avg"]).round(2)
+    biz = biz.dropna(subset=["latitude", "longitude", "avg_rating"])
+    biz["avg_rating"] = pd.to_numeric(biz["avg_rating"], errors="coerce")
+    biz = biz.dropna(subset=["avg_rating"])
+
+    peer_col = PEER_GROUP_COLUMN if PEER_GROUP_COLUMN in biz.columns else "state"
+    biz["peer_avg"] = biz.groupby(peer_col)["avg_rating"].transform("mean")
+    biz["vs_peer"]  = (biz["avg_rating"] - biz["peer_avg"]).round(2)
 
     delta = SIGNIFICANT_DELTA_STARS
 
     def status(d):
-        if pd.isna(d):
-            return "On Par"
-        if d >= delta:
-            return "Above Peer"
-        if d <= -delta:
-            return "Below Peer"
+        if d >= delta:  return "Above Peer"
+        if d <= -delta: return "Below Peer"
         return "On Par"
 
-    agg["status"] = agg["vs_peer"].apply(status)
+    biz["status"] = biz["vs_peer"].apply(status)
 
-    agg["label"] = (
-        agg["place_name"].astype(str) + "<br>" +
-        agg["address"].fillna("").astype(str) + "<br>" +
-        agg["city"].fillna("").astype(str) + ", " +
-        agg["state"].fillna("").astype(str)
-    )
+    # Store original lat/lon for tooltip, jitter display coords
+    biz["lat_display"] = add_jitter(biz["latitude"])
+    biz["lon_display"] = add_jitter(biz["longitude"])
 
-    return agg
+    biz["label"] = (biz.get("name", biz["business_id"]).astype(str)
+                    + "<br>" + biz.get("address", "").astype(str)
+                    + "<br>" + biz.get("city", "").astype(str)
+                    + ", " + biz.get("state", "").astype(str))
+
+    biz["short_label"] = (biz.get("city", "").astype(str)
+                          + ", " + biz.get("state", "").astype(str)
+                          + "  " + biz["avg_rating"].round(1).astype(str) + "⭐")
+
+    return biz, reviews
 
 
-def show_location_map(df):
-    st.markdown("## 🗺️ Store Pulse Map")
+def show():
+    brand_id   = st.session_state.get("selected_brand_id")
+    brand_name = st.session_state.get("selected_brand_name", "All Brands")
+
+    st.markdown(f"## 🗺️ Store Pulse Map - {brand_name}")
     st.markdown(
-        f"Every **{BRAND_NAME}** location benchmarked against its state peer group. "
-        "🔴 Below peer · 🟡 On par · 🟢 Above peer"
+        "Every location benchmarked against its **state peer group**. "
+        "🔴 Below peer · 🟡 On par · 🟢 Above peer - "
+        "pins are slightly spread so overlapping stores are visible individually."
     )
 
-    locs = build_location_stats(df)
+    biz, reviews = load_and_process(brand_id)
 
-    if locs.empty:
-        st.warning("No location data with valid coordinates found.")
+    if biz is None or len(biz) == 0:
+        st.error("No location data found. Run:\n"
+                 "```\npython module1_voice_of_customer/01_extract_reviews.py\n```")
         return
 
-    # Debug info (visible to you, harmless to leave in)
-    with st.expander("🔍 Debug: status breakdown"):
-        st.write(locs["status"].value_counts())
-        st.write(f"vs_peer range: {locs['vs_peer'].min()} to {locs['vs_peer'].max()}")
-        st.write(f"Significant delta threshold: ±{SIGNIFICANT_DELTA_STARS}")
-
-    # ── Sidebar filters ───────────────────────────────────────────────────────
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🗺️ Map Filters")
-    states = sorted(locs["state"].dropna().unique()) if "state" in locs.columns else []
+    states = sorted(biz["state"].dropna().unique()) if "state" in biz.columns else []
     sel_states = st.sidebar.multiselect("States", options=states, default=states)
-    sel_status = st.sidebar.multiselect(
-        "Status", options=["Above Peer", "On Par", "Below Peer"],
-        default=["Above Peer", "On Par", "Below Peer"]
-    )
-    min_rev = st.sidebar.slider("Min reviews per location", 1, 20, 1)
 
-    mask = locs["status"].isin(sel_status) & (locs["review_count"] >= min_rev)
+    sel_status = st.sidebar.multiselect(
+        "Status",
+        options=["Above Peer", "On Par", "Below Peer"],
+        default=["Above Peer", "On Par", "Below Peer"],
+    )
+    min_rev = st.sidebar.slider("Min reviews per location", 1, 30, 1)
+
+    view_mode = st.sidebar.radio(
+        "Map view",
+        options=["📍 Individual pins (jittered)", "🔵 Cluster mode"],
+        index=0,
+    )
+
+    # ── Filter ────────────────────────────────────────────────────────────────
+    mask = biz["status"].isin(sel_status) & (biz["review_count"] >= min_rev)
     if sel_states:
-        mask &= locs["state"].isin(sel_states)
-    filtered = locs[mask].copy()
+        mask &= biz["state"].isin(sel_states)
+    filtered = biz[mask].copy()
 
     if filtered.empty:
-        st.warning("No locations match current filters.")
+        st.warning("No locations match filters. Try lowering the min reviews slider.")
         return
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Locations",      len(filtered))
-    c2.metric("Avg Rating",     f"{filtered['avg_rating'].mean():.2f} ⭐")
-    c3.metric("Total Reviews",  f"{int(filtered['review_count'].sum()):,}")
-    c4.metric("States Covered", filtered["state"].nunique() if "state" in filtered.columns else "-")
-    c5.metric("🔴 Below Peer",  int((filtered["status"] == "Below Peer").sum()))
-    c6.metric("🟢 Above Peer",  int((filtered["status"] == "Above Peer").sum()))
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("Locations",     len(filtered))
+    c2.metric("Avg Rating",    f"{filtered['avg_rating'].mean():.2f} ⭐")
+    c3.metric("Total Reviews", f"{int(filtered['review_count'].sum()):,}")
+    c4.metric("States",        filtered["state"].nunique() if "state" in filtered.columns else "-")
+    c5.metric("🔴 Below Peer", int((filtered["status"]=="Below Peer").sum()))
+    c6.metric("🟢 Above Peer", int((filtered["status"]=="Above Peer").sum()))
 
     st.markdown("---")
 
-    # Fixed, explicit color mapping - guaranteed distinct colors
-    STATUS_COLORS = {
-        "Above Peer": "#1D9E75",   # green
-        "On Par":     "#F59E0B",   # amber/orange
-        "Below Peer": "#E24B4A",   # red
-    }
+    color_map = {"Above Peer":"#1D9E75","On Par":"#F59E0B","Below Peer":"#E24B4A"}
 
-    view = st.sidebar.radio("Map view", ["📍 Individual pins", "🔵 Cluster mode"], index=0)
-
-    fig = go.Figure()
-
-    # Loop status in a FIXED order so legend always shows all 3 entries
-    for status_val in ["Above Peer", "On Par", "Below Peer"]:
-        color = STATUS_COLORS[status_val]
-        sub = filtered[filtered["status"] == status_val]
-
-        if sub.empty:
-            # Add an empty invisible trace so the legend entry still appears
+    # ── Map ───────────────────────────────────────────────────────────────────
+    if "Cluster" in view_mode:
+        # Cluster mode: one trace per status, use cluster marker
+        fig = go.Figure()
+        for status_val, color in color_map.items():
+            sub = filtered[filtered["status"] == status_val]
+            if sub.empty:
+                continue
             fig.add_trace(go.Scattermapbox(
-                lat=[None], lon=[None],
+                lat=sub["lat_display"],
+                lon=sub["lon_display"],
                 mode="markers",
-                marker=go.scattermapbox.Marker(size=10, color=color),
-                name=f"{status_val} (0)",
-                showlegend=True,
+                marker=go.scattermapbox.Marker(
+                    size=14,
+                    color=color,
+                    opacity=0.85,
+                ),
+                cluster=dict(
+                    enabled=True,
+                    color=color,
+                    size=20,
+                    step=3,
+                ),
+                text=sub["label"],
+                customdata=np.stack([
+                    sub["avg_rating"].round(2),
+                    sub["peer_avg"].round(2),
+                    sub["vs_peer"],
+                    sub["review_count"],
+                    sub.get("city", sub["business_id"]),
+                    sub.get("state", ""),
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
+                    "Rating: %{customdata[0]}⭐<br>"
+                    "State avg: %{customdata[1]}⭐<br>"
+                    "vs Peers: %{customdata[2]:+.2f}⭐<br>"
+                    "Reviews: %{customdata[3]}<extra></extra>"
+                ),
+                name=status_val,
             ))
-            continue
 
-        np.random.seed(42)
-        lat_j = sub["latitude"]  + np.random.uniform(-0.01, 0.01, len(sub))
-        lon_j = sub["longitude"] + np.random.uniform(-0.01, 0.01, len(sub))
-
-        max_count = max(filtered["review_count"].max(), 1)
-        marker_sizes = np.clip(10 + (sub["review_count"] / max_count) * 16, 10, 26)
-
-        trace_kwargs = dict(
-            lat=lat_j, lon=lon_j,
-            mode="markers",
-            marker=go.scattermapbox.Marker(
-                size=marker_sizes,
-                color=color,
-                opacity=0.9,
-            ),
-            customdata=np.stack([
-                sub["place_name"].astype(str),
-                sub["address"].fillna("").astype(str),
-                sub["city"].fillna("").astype(str),
-                sub["state"].fillna("").astype(str),
-                sub["avg_rating"],
-                sub["peer_avg"],
-                sub["vs_peer"],
-                sub["review_count"],
-                sub["pct_negative"],
-            ], axis=-1),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "%{customdata[1]}<br>"
-                "%{customdata[2]}, %{customdata[3]}<br>"
-                "──────────────────<br>"
-                "⭐ Rating:    <b>%{customdata[4]:.2f}</b><br>"
-                "📊 State avg: %{customdata[5]:.2f}<br>"
-                "📈 vs Peers:  <b>%{customdata[6]:+.2f}</b><br>"
-                "💬 Reviews:   %{customdata[7]}<br>"
-                "👎 Negative:  %{customdata[8]:.1f}%%"
-                "<extra></extra>"
-            ),
-            name=f"{status_val} ({len(sub)})",
-            showlegend=True,
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            mapbox_zoom=3.5,
+            mapbox_center={"lat":37.5,"lon":-96},
+            height=560,
+            margin=dict(l=0,r=0,t=0,b=0),
+            legend=dict(title="vs State Peers", bgcolor="rgba(255,255,255,0.9)"),
+            dragmode="zoom",
         )
 
-        if "Cluster" in view:
-            trace_kwargs["cluster"] = dict(enabled=True, color=color, size=20, step=3)
+    else:
+        # Individual jittered pins - sized by review count, colored by status
+        filtered["marker_size"] = np.clip(
+            8 + (filtered["review_count"] / filtered["review_count"].max()) * 14,
+            8, 22
+        )
 
-        fig.add_trace(go.Scattermapbox(**trace_kwargs))
+        fig = go.Figure()
+        for status_val, color in color_map.items():
+            sub = filtered[filtered["status"] == status_val]
+            if sub.empty:
+                continue
+            fig.add_trace(go.Scattermapbox(
+                lat=sub["lat_display"],
+                lon=sub["lon_display"],
+                mode="markers+text",
+                marker=go.scattermapbox.Marker(
+                    size=sub["marker_size"],
+                    color=color,
+                    opacity=0.88,
+                ),
+                text=sub["avg_rating"].round(1).astype(str) + "⭐",
+                textposition="top right",
+                textfont=dict(size=9, color="#333"),
+                customdata=np.stack([
+                    sub["avg_rating"].round(2),
+                    sub["peer_avg"].round(2),
+                    sub["vs_peer"],
+                    sub["review_count"],
+                    sub.get("city", sub["business_id"]),
+                    sub.get("state", ""),
+                    sub.get("address", ""),
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
+                    "%{customdata[6]}<br>"
+                    "──────────────<br>"
+                    "⭐ Rating:      <b>%{customdata[0]}</b><br>"
+                    "📊 State avg:   %{customdata[1]}<br>"
+                    "📈 vs Peers:    <b>%{customdata[2]:+.2f}</b><br>"
+                    "💬 Reviews:     %{customdata[3]}<extra></extra>"
+                ),
+                name=status_val,
+            ))
 
-    center_lat = filtered["latitude"].mean()
-    center_lon = filtered["longitude"].mean()
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            mapbox_zoom=3.8,
+            mapbox_center={"lat":37.5,"lon":-96},
+            height=560,
+            margin=dict(l=0,r=0,t=0,b=0),
+            legend=dict(title="vs State Peers", bgcolor="rgba(255,255,255,0.9)"),
+            dragmode="zoom",
+        )
 
-    fig.update_layout(
-        mapbox_style="carto-positron",
-        mapbox_zoom=3.5,
-        mapbox_center={"lat": center_lat, "lon": center_lon},
-        height=560,
-        margin=dict(l=0, r=0, t=0, b=0),
-        showlegend=True,
-        legend=dict(
-            title="<b>vs State Peers</b>",
-            bgcolor="rgba(255,255,255,0.95)",
-            bordercolor="#CBD5E1",
-            borderwidth=1,
-            font=dict(size=12),
-            x=0.02, y=0.98,
-        ),
-        dragmode="zoom",
-    )
     st.plotly_chart(fig, use_container_width=True, config={
         "scrollZoom": True,
         "displayModeBar": True,
         "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+        "toImageButtonOptions": {"format": "png", "filename": "store_pulse_map"},
     })
-    st.caption("💡 Scroll to zoom · Pins sized by review count · Hover for full details")
+    st.caption("💡 Tip: Pins are slightly spread so overlapping stores are individually visible. "
+               "Hover for full address and rating details. Switch to Cluster mode in the sidebar to see density.")
 
     # ── Attention table ───────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 🔴 Locations Needing Attention")
-    st.caption("Stores furthest below their state peer average.")
+    st.markdown("### 🔴 Locations Needing Most Attention")
+    st.caption("Stores furthest below their state peer average - priority Field Leader calls.")
 
-    bottom = (filtered[filtered["status"] == "Below Peer"]
-              .sort_values("vs_peer")
-              [["place_name", "address", "city", "state", "avg_rating", "peer_avg", "vs_peer", "review_count", "pct_negative"]]
-              .head(15).copy())
+    disp_cols = [c for c in ["short_label","state","avg_rating","peer_avg","vs_peer","review_count"] if c in filtered.columns]
+    bottom = (filtered[filtered["status"]=="Below Peer"]
+              .sort_values("vs_peer")[disp_cols].head(15).copy())
 
     if bottom.empty:
-        st.success("✅ No locations significantly below state peer group with current filters.")
+        st.success("✅ No locations significantly below their state peer group.")
     else:
+        for col in ["avg_rating","peer_avg","vs_peer"]:
+            if col in bottom.columns:
+                bottom[col] = bottom[col].round(2)
         st.dataframe(bottom, column_config={
-            "place_name":   st.column_config.TextColumn("Location"),
-            "address":      st.column_config.TextColumn("Address"),
-            "city":         st.column_config.TextColumn("City"),
-            "state":        st.column_config.TextColumn("State"),
+            "short_label":  st.column_config.TextColumn("Location"),
             "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
             "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
             "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=-2, max_value=0, format="%.2f ⭐"),
             "review_count": st.column_config.NumberColumn("Reviews"),
-            "pct_negative": st.column_config.NumberColumn("Negative %", format="%.1f%%"),
         }, use_container_width=True, hide_index=True)
 
+    # ── Top performers ────────────────────────────────────────────────────────
     st.markdown("### 🟢 Top Performing Locations")
-    top = (filtered[filtered["status"] == "Above Peer"]
-           .sort_values("vs_peer", ascending=False)
-           [["place_name", "address", "city", "state", "avg_rating", "peer_avg", "vs_peer", "review_count"]]
-           .head(15).copy())
+    st.caption("Best-practice targets - stores significantly outperforming their state peers.")
+
+    top = (filtered[filtered["status"]=="Above Peer"]
+           .sort_values("vs_peer", ascending=False)[disp_cols].head(15).copy())
 
     if top.empty:
         st.info("No locations significantly above peer group with current filters.")
     else:
+        for col in ["avg_rating","peer_avg","vs_peer"]:
+            if col in top.columns:
+                top[col] = top[col].round(2)
         st.dataframe(top, column_config={
-            "place_name":   st.column_config.TextColumn("Location"),
-            "address":      st.column_config.TextColumn("Address"),
-            "city":         st.column_config.TextColumn("City"),
-            "state":        st.column_config.TextColumn("State"),
+            "short_label":  st.column_config.TextColumn("Location"),
             "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
             "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
             "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=0, max_value=2, format="+%.2f ⭐"),
@@ -285,143 +307,52 @@ def show_location_map(df):
     # ── State bar chart ───────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📊 Average Rating by State")
-    if "state" in filtered.columns and filtered["state"].notna().any():
+
+    if "state" in filtered.columns:
         sa = (filtered.groupby("state")
-              .agg(avg_rating=("avg_rating", "mean"), locations=("place_name", "count"))
+              .agg(avg_rating=("avg_rating","mean"), locations=("business_id","count"))
               .sort_values("avg_rating", ascending=False).reset_index())
         sa["avg_rating"] = sa["avg_rating"].round(2)
         chain_avg = filtered["avg_rating"].mean()
 
-        fig2 = px.bar(sa, x="state", y="avg_rating",
-                      color="avg_rating",
-                      color_continuous_scale=["#E24B4A", "#F59E0B", "#1D9E75"],
-                      range_color=[2.0, 5.0], text="avg_rating",
-                      hover_data={"locations": True},
-                      labels={"state": "State", "avg_rating": "Avg Rating"})
+        fig2 = px.bar(
+            sa, x="state", y="avg_rating",
+            color="avg_rating",
+            color_continuous_scale=["#E24B4A","#F59E0B","#1D9E75"],
+            range_color=[2.0, 4.5],
+            text="avg_rating",
+            hover_data={"locations":True},
+            labels={"state":"State","avg_rating":"Avg Rating"},
+        )
         fig2.add_hline(y=chain_avg, line_dash="dot", line_color="#60a5fa",
                        annotation_text=f"Chain avg: {chain_avg:.2f} ⭐",
                        annotation_position="top right")
         fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-        fig2.update_layout(height=360, margin=dict(l=0, r=0, t=20, b=0),
-                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                           coloraxis_showscale=False)
+        fig2.update_layout(
+            height=360,
+            margin=dict(l=0,r=0,t=20,b=0),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            coloraxis_showscale=False,
+        )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Rating trend ──────────────────────────────────────────────────────────
-    if "date" in df.columns and df["date"].notna().any():
+    # ── Rating over time ──────────────────────────────────────────────────────
+    if reviews is not None:
         st.markdown("### 📈 Rating Trend Over Time")
-        place_names = filtered["place_name"].tolist()
-        rev_f = df[df["place_name"].isin(place_names)].copy() if "place_name" in df.columns else df
-        if not rev_f.empty:
-            monthly = rev_f.set_index("date")["stars"].resample("ME").mean().reset_index()
-            monthly.columns = ["Month", "Avg Rating"]
-            monthly = monthly.dropna()
-            if not monthly.empty:
-                fig3 = px.line(monthly, x="Month", y="Avg Rating", line_shape="spline")
-                fig3.update_traces(line_color="#60a5fa", line_width=2.5)
-                fig3.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0),
-                                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                                   yaxis=dict(range=[1, 5]))
-                st.plotly_chart(fig3, use_container_width=True)
-
-
-def show_version_trends(df):
-    st.markdown("## 📊 Version & Trend Intelligence")
-    st.markdown(f"How **{BRAND_NAME}** ratings evolve across app versions and time.")
-
-    total    = len(df)
-    rated    = df.dropna(subset=["stars"])
-    avg      = rated["stars"].mean() if len(rated) > 0 else 0
-    pct_neg  = (rated["stars"] <= 2).mean() * 100 if len(rated) > 0 else 0
-    pct_pos  = (rated["stars"] >= 4).mean() * 100 if len(rated) > 0 else 0
-    versions = df["version"].nunique() if "version" in df.columns else "-"
-
-    try:
-        if "date" in df.columns and df["date"].notna().any():
-            latest = df["date"].max()
-            recent = df[df["date"] >= latest - pd.Timedelta(days=30)]["stars"].mean()
-            prior  = df[(df["date"] >= latest - pd.Timedelta(days=60)) &
-                        (df["date"] <  latest - pd.Timedelta(days=30))]["stars"].mean()
-            trend  = round(recent - prior, 2) if not (np.isnan(prior) or np.isnan(recent)) else 0
-        else:
-            trend = 0
-    except Exception:
-        trend = 0
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total Reviews", f"{total:,}")
-    c2.metric("Avg Rating",    f"{avg:.2f} ⭐")
-    c3.metric("1-2 Star",      f"{pct_neg:.1f}%")
-    c4.metric("4-5 Star",      f"{pct_pos:.1f}%")
-    c5.metric("App Versions",  versions)
-    c6.metric("30-day Trend",  f"{trend:+.2f} ⭐", delta=f"{trend:+.2f}")
-
-    if "date" in df.columns and df["date"].notna().any():
-        st.markdown("---")
-        st.markdown("### 📈 Rating Trend Over Time")
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            freq = st.selectbox("Interval", ["Weekly", "Monthly"], index=1)
-        rf = "W" if freq == "Weekly" else "ME"
-        monthly = df.set_index("date")["stars"].resample(rf).mean().reset_index()
-        monthly.columns = ["Period", "Avg Rating"]
-        monthly = monthly.dropna()
-        if not monthly.empty:
-            fig = px.line(monthly, x="Period", y="Avg Rating", line_shape="spline")
-            fig.update_traces(line_color="#60a5fa", line_width=2.5)
-            fig.add_hline(y=avg, line_dash="dot", line_color="#94a3b8",
-                          annotation_text=f"Overall avg: {avg:.2f}")
-            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
-                              plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                              yaxis=dict(range=[1, 5]))
-            st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
-
-    if "version" in df.columns and df["version"].notna().any() and df["version"].nunique() > 1:
-        st.markdown("---")
-        st.markdown("### 📱 Rating by App Version")
-        va = (df.groupby("version")["stars"]
-              .agg(avg_rating="mean", review_count="count")
-              .reset_index())
-        va = va[va["review_count"] >= 1].copy()
-        va["avg_rating"] = va["avg_rating"].round(2)
-        va = va.sort_values("avg_rating")
-
-        fig2 = px.bar(va, x="avg_rating", y="version", orientation="h",
-                      color="avg_rating",
-                      color_continuous_scale=["#E24B4A", "#F59E0B", "#1D9E75"],
-                      range_color=[1, 5], text="avg_rating",
-                      hover_data={"review_count": True})
-        fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-        fig2.update_layout(height=max(300, len(va) * 35),
-                           margin=dict(l=0, r=80, t=10, b=0),
-                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                           coloraxis_showscale=False, yaxis_title="")
-        st.plotly_chart(fig2, use_container_width=True)
-
-        worst = va.nsmallest(5, "avg_rating")[["version", "avg_rating", "review_count"]]
-        best  = va.nlargest(5, "avg_rating")[["version", "avg_rating", "review_count"]]
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**🔴 Lowest Rated Versions**")
-            st.dataframe(worst, column_config={
-                "avg_rating":   st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
-                "review_count": st.column_config.NumberColumn("Reviews"),
-            }, use_container_width=True, hide_index=True)
-        with col2:
-            st.markdown("**🟢 Highest Rated Versions**")
-            st.dataframe(best, column_config={
-                "avg_rating":   st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
-                "review_count": st.column_config.NumberColumn("Reviews"),
-            }, use_container_width=True, hide_index=True)
-
-
-def show():
-    df = load_data()
-    if df is None or df.empty:
-        st.error("No data found. Trigger the GitHub Actions workflow to scrape data.")
-        return
-
-    if has_location_data(df):
-        show_location_map(df)
-    else:
-        show_version_trends(df)
+        biz_ids = filtered["business_id"].tolist()
+        rev_f = reviews[reviews["business_id"].isin(biz_ids)].copy()
+        if not rev_f.empty and "date" in rev_f.columns:
+            monthly = (rev_f.set_index("date")["stars"]
+                       .resample("ME").mean().reset_index())
+            monthly.columns = ["Month","Avg Rating"]
+            fig3 = px.line(monthly, x="Month", y="Avg Rating", line_shape="spline")
+            fig3.update_traces(line_color="#60a5fa", line_width=2.5)
+            fig3.update_layout(
+                height=240,
+                margin=dict(l=0,r=0,t=10,b=0),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(range=[1,5]),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
