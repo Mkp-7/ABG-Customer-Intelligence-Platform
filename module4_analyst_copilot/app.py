@@ -1,5 +1,5 @@
 """
-Module 4 - Analyst Copilot
+Module 4 — Analyst Copilot
 """
 
 import os
@@ -22,13 +22,8 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     if not os.path.exists(REVIEWS_CSV):
         return None, None
 
-    reviews = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
-
-    if os.path.exists(BUSINESSES_CSV):
-        biz = pd.read_csv(BUSINESSES_CSV)
-        df  = reviews.merge(biz[["business_id","name","city","state"]], on="business_id", how="left")
-    else:
-        df = reviews
+    # Reviews already contain city/state/place_name — no merge needed
+    df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
 
     if brand_id and "brand_id" in df.columns:
         df = df[df["brand_id"] == brand_id]
@@ -45,7 +40,7 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     else:
         d_min = d_max = "N/A"
     loc_col = "business_id" if "business_id" in df.columns else "place_name"
-    locs    = df[loc_col].nunique() if loc_col in df.columns else "-"
+    locs    = df[loc_col].nunique() if loc_col in df.columns else "—"
 
     dist = df["stars"].value_counts().sort_index()
     dist_text = ", ".join([f"{int(k)} star: {int(v)} ({v/total*100:.1f}%)" for k,v in dist.items()])
@@ -53,7 +48,8 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     state_stats = df.groupby("state")["stars"].agg(avg="mean",count="count").sort_values("avg").reset_index()
     state_text  = "\n".join([f"  {r['state']}: avg={r['avg']:.2f}, n={r['count']}" for _,r in state_stats.iterrows()])
 
-    store_agg = df.groupby("business_id").agg(
+    loc_col = "place_name" if "place_name" in df.columns else "city"
+    store_agg = df.groupby(loc_col).agg(
         avg_stars=("stars","mean"), n=("stars","count"),
         city=("city","first"), state=("state","first")
     ).reset_index()
@@ -67,7 +63,7 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     low_reviews = df[df["stars"]<=2]["text"].dropna().sample(min(10,len(df[df["stars"]<=2])),random_state=42).tolist()
     low_sample  = "\n".join([f"- {r[:200]}" for r in low_reviews])
 
-    context = f"""STORE PERFORMANCE DATA SUMMARY - {brand_name}
+    context = f"""STORE PERFORMANCE DATA SUMMARY — {brand_name}
 ================================
 Total reviews: {total:,}
 Date range: {d_min} to {d_max}
@@ -96,7 +92,7 @@ def show():
     brand_id   = st.session_state.get("selected_brand_id")
     brand_name = st.session_state.get("selected_brand_name", "All Brands")
 
-    st.markdown(f"## Analyst Copilot - {brand_name}")
+    st.markdown(f"## Analyst Copilot — {brand_name}")
     st.markdown(
         "Ask any question about store performance in plain English. "
         "The AI has full context of the dataset and responds with real numbers."
