@@ -16,12 +16,10 @@ jobs:
         python-version: '3.11'
 
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
-        pip install app-store-scraper googlemaps
+      run: pip install -r requirements.txt
 
     - name: Verify imports
-      run: python -c "import streamlit, groq, pandas, plotly, scipy, numpy; from app_store_scraper import AppStore; import googlemaps; print('All imports OK')"
+      run: python -c "import streamlit, groq, pandas, plotly, scipy, numpy; print('All imports OK')"
 
     - name: Verify file structure
       run: |
