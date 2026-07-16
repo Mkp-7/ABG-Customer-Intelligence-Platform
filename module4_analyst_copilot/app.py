@@ -1,102 +1,125 @@
-"""Module 4 - Analyst Copilot"""
+"""
+Module 4 - Analyst Copilot
+"""
 
-import os, sys
+import os
+import sys
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
-from config import REVIEWS_CSV, BRAND_NAME as APP_NAME, GROQ_MODEL
+
+from config import REVIEWS_CSV, BUSINESSES_CSV, PLATFORM_TITLE, GROQ_MODEL
 from module1_voice_of_customer.voc_analyzer import get_groq_client
 
 
 @st.cache_data(show_spinner=False)
-def build_context():
+def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     if not os.path.exists(REVIEWS_CSV):
         return None, None
-    df = pd.read_csv(REVIEWS_CSV)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    reviews = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+
+    if os.path.exists(BUSINESSES_CSV):
+        biz = pd.read_csv(BUSINESSES_CSV)
+        df  = reviews.merge(biz[["business_id","name","city","state"]], on="business_id", how="left")
+    else:
+        df = reviews
+
+    if brand_id and "brand_id" in df.columns:
+        df = df[df["brand_id"] == brand_id]
+
     df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
     df = df.dropna(subset=["stars"])
 
-    total = len(df)
-    avg   = df["stars"].mean()
-    if "date" in df.columns and df["date"].notna().any():
-        d_min = df["date"].min().strftime("%Y-%m-%d")
-        d_max = df["date"].max().strftime("%Y-%m-%d")
-    else:
-        d_min = d_max = "N/A"
+    total   = len(df)
+    avg     = df["stars"].mean()
+    d_min   = df["date"].min().strftime("%Y-%m-%d") if "date" in df.columns else "N/A"
+    d_max   = df["date"].max().strftime("%Y-%m-%d") if "date" in df.columns else "N/A"
+    locs    = df["business_id"].nunique()
 
     dist = df["stars"].value_counts().sort_index()
     dist_text = ", ".join([f"{int(k)} star: {int(v)} ({v/total*100:.1f}%)" for k,v in dist.items()])
 
-    if "version" in df.columns:
-        va = df.groupby("version")["stars"].agg(avg="mean",count="count").reset_index().sort_values("avg")
-        worst_v = "\n".join([f"  v{row.version}: {row.avg:.2f}⭐ ({row.count} reviews)" for row in va.head(3).itertuples(index=False)])
-        best_v  = "\n".join([f"  v{row.version}: {row.avg:.2f}⭐ ({row.count} reviews)" for row in va.tail(3).itertuples(index=False)])
-    else:
-        worst_v = best_v = "N/A"
+    state_stats = df.groupby("state")["stars"].agg(avg="mean",count="count").sort_values("avg").reset_index()
+    state_text  = "\n".join([f"  {r['state']}: avg={r['avg']:.2f}, n={r['count']}" for _,r in state_stats.iterrows()])
 
-    low_df = df[df["stars"]<=2]["text"].dropna()
-    low_reviews = low_df.sample(min(10,len(low_df)),random_state=42).tolist() if len(low_df)>0 else []
-    low_sample  = "\n".join([f"- {r[:200]}" for r in low_reviews]) if low_reviews else "No low-rated reviews found."
+    store_agg = df.groupby("business_id").agg(
+        avg_stars=("stars","mean"), n=("stars","count"),
+        city=("city","first"), state=("state","first")
+    ).reset_index()
 
-    high_df = df[df["stars"]>=4]["text"].dropna()
-    high_reviews = high_df.sample(min(5,len(high_df)),random_state=42).tolist() if len(high_df)>0 else []
-    high_sample  = "\n".join([f"- {r[:150]}" for r in high_reviews]) if high_reviews else "No high-rated reviews found."
+    worst = store_agg.nsmallest(5,"avg_stars")[["city","state","avg_stars","n"]]
+    worst_text = "\n".join([f"  {r['city']}, {r['state']}: {r['avg_stars']:.2f}⭐ ({r['n']} reviews)" for _,r in worst.iterrows()])
 
-    context = f"""APP STORE REVIEW DATA - {APP_NAME}
-====================================
+    best = store_agg.nlargest(5,"avg_stars")[["city","state","avg_stars","n"]]
+    best_text = "\n".join([f"  {r['city']}, {r['state']}: {r['avg_stars']:.2f}⭐ ({r['n']} reviews)" for _,r in best.iterrows()])
+
+    low_reviews = df[df["stars"]<=2]["text"].dropna().sample(min(10,len(df[df["stars"]<=2])),random_state=42).tolist()
+    low_sample  = "\n".join([f"- {r[:200]}" for r in low_reviews])
+
+    context = f"""STORE PERFORMANCE DATA SUMMARY - {brand_name}
+================================
 Total reviews: {total:,}
 Date range: {d_min} to {d_max}
 Average rating: {avg:.2f} / 5.0
+Locations covered: {locs}
 
 RATING DISTRIBUTION:
 {dist_text}
 
-LOWEST RATED VERSIONS:
-{worst_v}
+PERFORMANCE BY STATE:
+{state_text}
 
-HIGHEST RATED VERSIONS:
-{best_v}
+WORST 5 LOCATIONS:
+{worst_text}
 
-SAMPLE NEGATIVE REVIEWS (1-2 stars):
+BEST 5 LOCATIONS:
+{best_text}
+
+SAMPLE LOW-RATING REVIEWS (1-2 stars):
 {low_sample}
-
-SAMPLE POSITIVE REVIEWS (4-5 stars):
-{high_sample}
 """
     return context, df
 
 
 def show():
-    st.markdown("## 🤖 Analyst Copilot")
-    st.markdown(f"Ask anything about **{APP_NAME}** customer reviews in plain English.")
+    brand_id   = st.session_state.get("selected_brand_id")
+    brand_name = st.session_state.get("selected_brand_name", "All Brands")
+
+    st.markdown(f"## Analyst Copilot - {brand_name}")
+    st.markdown(
+        "Ask any question about store performance in plain English. "
+        "The AI has full context of the dataset and responds with real numbers."
+    )
 
     with st.spinner("Preparing data context..."):
-        context, df = build_context()
+        context, df = build_context(brand_id, brand_name)
 
     if context is None:
-        st.error("No data found. Push a change to trigger the scraper."); return
+        st.error("No data found. Run the extractor first:\n```bash\npython module1_voice_of_customer/01_extract_reviews.py\n```")
+        return
 
     try:
         client = get_groq_client()
     except ValueError as e:
-        st.error(str(e)); return
+        st.error(str(e))
+        return
 
-    st.markdown("### 💡 Try asking:")
+    st.markdown("### Try asking:")
     questions = [
-        "What are customers complaining about most?",
-        "Which app version caused the most issues?",
-        "What do happy customers love?",
-        "What is the overall sentiment trend?",
-        "What features do users request most?",
-        "Why are 1-star reviews being left?",
-        "What percentage of reviews mention shipping?",
-        "Summarize the top 3 problems to fix.",
+        "Which states have the lowest ratings?",
+        "What do customers complain about most?",
+        "How many locations are below 3 stars?",
+        "Which cities have the best performance?",
+        "What percentage of reviews are 1 or 2 stars?",
+        "What do happy customers mention most?",
+        "Which state has the most reviews?",
+        "Is there a trend in ratings over time?",
     ]
     cols = st.columns(4)
     for i, q in enumerate(questions):
@@ -113,7 +136,7 @@ def show():
             st.markdown(msg["content"])
 
     pending  = st.session_state.pop("pending", "")
-    user_in  = st.chat_input("Ask anything about the reviews...")
+    user_in  = st.chat_input("Ask anything about store performance...")
     question = user_in or pending
 
     if question:
@@ -121,12 +144,11 @@ def show():
             st.markdown(question)
         st.session_state["history"].append({"role":"user","content":question})
 
-        system = f"""You are an expert product analyst for {APP_NAME} with access to this App Store review data:
+        system = f"""You are an expert retail data analyst with access to the following data:
 
 {context}
 
-Answer using ONLY the data above. Be direct and specific. Use numbers. Under 150 words unless asked for detail.
-You are speaking to a Product Manager or VP of Customer Experience."""
+Answer using ONLY the data above. Be direct and specific. Use numbers. Under 150 words unless asked for detail."""
 
         msgs = [{"role":"system","content":system}]
         msgs += [{"role":m["role"],"content":m["content"]} for m in st.session_state["history"][-6:]]
@@ -134,7 +156,10 @@ You are speaking to a Product Manager or VP of Customer Experience."""
         with st.chat_message("assistant"):
             with st.spinner("Analyzing..."):
                 resp = client.chat.completions.create(
-                    model=GROQ_MODEL, messages=msgs, temperature=0.3, max_tokens=500,
+                    model=GROQ_MODEL,
+                    messages=msgs,
+                    temperature=0.3,
+                    max_tokens=500,
                 )
                 answer = resp.choices[0].message.content.strip()
                 st.markdown(answer)
