@@ -1,401 +1,325 @@
 """
-Smart Data Extractor - combines multiple sources automatically:
+Step 1 - Extract reviews from App Store and/or Google Maps (US only).
 
-  1. ALWAYS tries Apple App Store first (if APP_STORE_ID is set)
-  2. ALWAYS tries Google Maps via SerpAPI (nationwide coverage)
-  3. Combines both into one reviews.csv
+Data sources used (both free):
+  • App Store  → app-store-scraper  (no API key needed)
+  • Google Maps → Google Places API  (free $200/month credit)
+                  Get key: console.cloud.google.com → enable Places API
 
-This gives maximum review coverage regardless of whether the brand has an app.
+Configure in config.py:
+  APP_STORE_ID          = "308342527"       # set to None to skip
+  GOOGLE_PLACES_API_KEY = "AIza..."         # set to None to skip
+  GOOGLE_SEARCH_QUERY   = "Avis car rental" # what to search on Google Maps
+
+Usage:
+    python module1_voice_of_customer/01_extract_reviews.py
+
+Output:
+    data/businesses.csv
+    data/reviews.csv
 """
 
-import os, sys, csv, json, time, re
-import urllib.request, urllib.parse, urllib.error
-from datetime import datetime, timedelta
+import os
+import sys
+import uuid
+import hashlib
+from datetime import datetime
+
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    BRAND_NAME, KEYWORDS, APP_STORE_ID, APP_COUNTRY,
-    MAX_REVIEW_PAGES, DATA_DIR, REVIEWS_CSV,
+    APP_STORE_ID,
+    APP_STORE_COUNTRY,
+    APP_STORE_MAX_REVIEWS,
+    GOOGLE_PLACES_API_KEY,
+    GOOGLE_SEARCH_QUERY,
+    GOOGLE_MAX_LOCATIONS,
+    GOOGLE_REVIEWS_PER_LOC,
+    BUSINESSES_CSV,
+    REVIEWS_CSV,
+    DATA_DIR,
+    PLATFORM_TITLE,
 )
 
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
-HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                   "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
-FIELDNAMES = [
-    "review_id", "stars", "date", "title", "text",
-    "source", "product", "version", "vote_count",
-    "place_name", "address", "city", "state",
-    "latitude", "longitude", "google_rating", "total_reviews_at_location",
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def make_id(*parts) -> str:
+    """Deterministic short ID from input parts."""
+    raw = "_".join(str(p) for p in parts)
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+# ── Source 1: App Store ───────────────────────────────────────────────────────
+
+def extract_app_store() -> tuple[list[dict], list[dict]]:
+    """Pull reviews from the iOS App Store. Returns (businesses, reviews)."""
+    if not APP_STORE_ID:
+        print("   App Store: skipped (APP_STORE_ID not set in config.py)")
+        return [], []
+
+    try:
+        from app_store_scraper import AppStore
+    except ImportError:
+        print("   ERROR: run  pip install app-store-scraper")
+        return [], []
+
+    print(f"   Fetching up to {APP_STORE_MAX_REVIEWS} App Store reviews (ID: {APP_STORE_ID})...")
+
+    scraper = AppStore(
+        country=APP_STORE_COUNTRY,
+        app_name=PLATFORM_TITLE.lower().replace(" ", "-"),
+        app_id=APP_STORE_ID,
+    )
+    scraper.review(how_many=APP_STORE_MAX_REVIEWS)
+
+    raw = scraper.reviews or []
+    if not raw:
+        print("   App Store: 0 reviews returned.")
+        return [], []
+
+    biz_id = f"appstore_{APP_STORE_ID}"
+
+    business = [{
+        "business_id":  biz_id,
+        "name":         f"{PLATFORM_TITLE} (App Store)",
+        "address":      "",
+        "city":         "",
+        "state":        "APP",          # sentinel so modules can filter
+        "postal_code":  "",
+        "latitude":     "",
+        "longitude":    "",
+        "stars":        round(sum(r.get("rating", 0) for r in raw) / len(raw), 2),
+        "review_count": len(raw),
+        "is_open":      1,
+        "source":       "appstore",
+    }]
+
+    reviews = []
+    for r in raw:
+        date_val = r.get("date", "")
+        if isinstance(date_val, datetime):
+            date_str = date_val.strftime("%Y-%m-%d")
+        else:
+            date_str = str(date_val)[:10]
+
+        reviews.append({
+            "review_id":   make_id(biz_id, r.get("userName", ""), date_str),
+            "business_id": biz_id,
+            "user_id":     r.get("userName", "anonymous"),
+            "stars":       r.get("rating", ""),
+            "date":        date_str,
+            "text":        (r.get("review") or r.get("title") or "").replace("\n", " ").strip(),
+            "useful":      0,
+            "funny":       0,
+            "cool":        0,
+            "source":      "appstore",
+            "app_version": r.get("version", ""),
+        })
+
+    print(f"   App Store: {len(reviews)} reviews collected ✅")
+    return business, reviews
+
+
+# ── Source 2: Google Maps ─────────────────────────────────────────────────────
+
+# US states for targeted search
+US_STATES = [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada",
+    "New Hampshire","New Jersey","New Mexico","New York","North Carolina",
+    "North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island",
+    "South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont",
+    "Virginia","Washington","West Virginia","Wisconsin","Wyoming",
 ]
 
-# US states for nationwide search coverage
-US_STATE_MAP = {
-    "California":"CA","Texas":"TX","Florida":"FL","New York":"NY","Pennsylvania":"PA",
-    "Illinois":"IL","Ohio":"OH","Georgia":"GA","North Carolina":"NC","Michigan":"MI",
-    "New Jersey":"NJ","Virginia":"VA","Washington":"WA","Arizona":"AZ","Massachusetts":"MA",
-    "Tennessee":"TN","Indiana":"IN","Missouri":"MO","Maryland":"MD","Wisconsin":"WI",
-    "Colorado":"CO","Minnesota":"MN","South Carolina":"SC","Alabama":"AL","Louisiana":"LA",
-    "Nevada":"NV","Oregon":"OR","Connecticut":"CT",
-}
-US_STATES = list(US_STATE_MAP.keys())
 
+def extract_google_maps() -> tuple[list[dict], list[dict]]:
+    """Pull reviews from Google Maps via Places API. Returns (businesses, reviews)."""
+    api_key = GOOGLE_PLACES_API_KEY or os.environ.get("GOOGLE_PLACES_API_KEY")
 
-def fetch_url(url, timeout=20):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8")
+    if not api_key:
+        print("   Google Maps: skipped (GOOGLE_PLACES_API_KEY not set)")
+        return [], []
 
+    if not GOOGLE_SEARCH_QUERY:
+        print("   Google Maps: skipped (GOOGLE_SEARCH_QUERY not set in config.py)")
+        return [], []
 
-def parse_relative_date(text):
-    if not text:
-        return datetime.now().strftime("%Y-%m-%d")
-    text = text.lower().strip()
-    now  = datetime.now()
     try:
-        if "just now" in text or "moment" in text:
-            return now.strftime("%Y-%m-%d")
-        num = re.search(r'\d+', text)
-        n   = int(num.group()) if num else 1
-        if "year"  in text: return (now - timedelta(days=n*365)).strftime("%Y-%m-%d")
-        if "month" in text: return (now - timedelta(days=n*30)).strftime("%Y-%m-%d")
-        if "week"  in text: return (now - timedelta(days=n*7)).strftime("%Y-%m-%d")
-        if "day"   in text: return (now - timedelta(days=n)).strftime("%Y-%m-%d")
-        if "hour"  in text or "minute" in text: return now.strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    return now.strftime("%Y-%m-%d")
+        import googlemaps
+    except ImportError:
+        print("   ERROR: run  pip install googlemaps")
+        return [], []
 
+    gmaps = googlemaps.Client(key=api_key)
 
-def parse_address(raw_address, search_term=""):
-    """
-    Extract city and state from address string.
-    Falls back to the search term's state name if the address
-    doesn't contain a clean state code (common with mall/outlet addresses).
-    """
-    city, state = "", ""
-    if raw_address:
-        parts = [p.strip() for p in raw_address.split(",") if p.strip()]
-        for i, part in enumerate(parts):
-            m = re.search(r'\b([A-Z]{2})\b\s*\d{0,5}$', part)
-            if m and m.group(1) not in ("US", "ST", "RD", "DR", "BLVD", "AVE"):
-                state = m.group(1)
-                if i > 0:
-                    city = parts[i-1]
-                break
+    print(f"   Google Maps: searching '{GOOGLE_SEARCH_QUERY}' across US states...")
+    print(f"   Cap: {GOOGLE_MAX_LOCATIONS} locations, {GOOGLE_REVIEWS_PER_LOC} reviews each")
 
-    # Fallback: use the state we searched for (most reliable for mall addresses)
-    if not state and search_term:
-        for st_name, st_code in US_STATE_MAP.items():
-            if st_name.lower() in search_term.lower():
-                state = st_code
-                break
-
-    return city.strip(), state.strip()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 1 - Apple App Store (auto-discovers app ID if not set)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def auto_find_app_id(brand_name):
-    """
-    Search iTunes for an app matching the brand name.
-    Returns (app_id, app_title) or (None, None) if no good match found.
-    Free, no API key needed.
-    """
-    print(f"\n🔎 Auto-searching App Store for: '{brand_name}'...")
-    try:
-        query = urllib.parse.quote_plus(brand_name)
-        url = f"https://itunes.apple.com/search?term={query}&entity=software&country={APP_COUNTRY}&limit=10"
-        data = json.loads(fetch_url(url))
-        results = data.get("results", [])
-
-        if not results:
-            print(f"   No App Store apps found for '{brand_name}'.")
-            return None, None
-
-        # Find best match: app title contains the brand name, has decent rating count
-        brand_lower = brand_name.lower()
-        candidates = []
-        for app in results:
-            title = app.get("trackName", "")
-            rating_count = app.get("userRatingCount", 0)
-            if brand_lower in title.lower():
-                candidates.append((app.get("trackId"), title, rating_count))
-
-        if not candidates:
-            # Fall back to top result even if name doesn't match exactly
-            top = results[0]
-            app_id = str(top.get("trackId", ""))
-            title  = top.get("trackName", "")
-            ratings = top.get("userRatingCount", 0)
-            print(f"   No exact name match. Closest result: '{title}' ({ratings} ratings)")
-            if ratings < 50:
-                print(f"   Too few ratings to be useful - skipping App Store.")
-                return None, None
-            return app_id, title
-
-        # Pick candidate with most ratings (most likely the real official app)
-        candidates.sort(key=lambda x: -x[2])
-        app_id, title, ratings = candidates[0]
-
-        print(f"   Found: '{title}' (ID: {app_id}, {ratings} ratings)")
-
-        if ratings < 20:
-            print(f"   Too few ratings ({ratings}) to be useful - skipping App Store.")
-            return None, None
-
-        return str(app_id), title
-
-    except Exception as ex:
-        print(f"   Auto-search failed: {ex}")
-        return None, None
-
-
-def scrape_app_store():
-    app_id = APP_STORE_ID.strip()
-
-    if not app_id:
-        app_id, found_title = auto_find_app_id(BRAND_NAME)
-        if not app_id:
-            print("   Skipping App Store - no usable app found.")
-            return []
-
-    print(f"\n📱 Scraping Apple App Store (ID: {app_id})...")
+    seen_place_ids = set()
+    businesses = []
     reviews = []
-    for page in range(1, MAX_REVIEW_PAGES + 1):
-        url = (f"https://itunes.apple.com/{APP_COUNTRY}/rss/customerreviews"
-               f"/page={page}/id={app_id}/sortby=mostrecent/json")
-        try:
-            data    = json.loads(fetch_url(url))
-            entries = data.get("feed", {}).get("entry", [])
-            if page == 1 and entries:
-                entries = entries[1:]
-            if not entries:
-                break
-            for e in entries:
-                reviews.append({
-                    "review_id":  e.get("id",{}).get("label",""),
-                    "stars":      e.get("im:rating",{}).get("label",""),
-                    "date":       e.get("updated",{}).get("label","")[:10],
-                    "title":      e.get("title",{}).get("label",""),
-                    "text":       e.get("content",{}).get("label","").replace("\n"," ").strip(),
-                    "source":     "app_store",
-                    "product":    BRAND_NAME,
-                    "version":    e.get("im:version",{}).get("label",""),
-                    "vote_count": e.get("im:voteCount",{}).get("label","0"),
-                    "place_name": "", "address": "", "city": "", "state": "",
-                    "latitude": "", "longitude": "",
-                    "google_rating": "", "total_reviews_at_location": "",
-                })
-            print(f"   Page {page}: {len(entries)} reviews (total: {len(reviews)})")
-            time.sleep(0.5)
-        except Exception as ex:
-            print(f"   Page {page}: {ex} - stopping.")
+
+    for state in tqdm(US_STATES, desc="   States"):
+        if len(seen_place_ids) >= GOOGLE_MAX_LOCATIONS:
             break
 
-    print(f"   ✅ App Store: {len(reviews)} reviews")
-    return reviews
+        query = f"{GOOGLE_SEARCH_QUERY} {state} USA"
+        try:
+            result = gmaps.places(query=query, region="us")
+        except Exception as e:
+            print(f"   Warning: search failed for {state}: {e}")
+            continue
 
+        for place in result.get("results", []):
+            if len(seen_place_ids) >= GOOGLE_MAX_LOCATIONS:
+                break
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 2 - Google Maps via SerpAPI
-# ══════════════════════════════════════════════════════════════════════════════
-
-def serpapi_get(params):
-    params["api_key"] = SERPAPI_KEY
-    url = f"https://serpapi.com/search?{urllib.parse.urlencode(params)}"
-    return json.loads(fetch_url(url))
-
-
-def scrape_location_reviews(keyword, max_locations=1, max_pages=1):
-    """
-    Search Google Maps for keyword, scrape reviews with full location metadata.
-    Returns (reviews_list, api_calls_made).
-    """
-    reviews = []
-    calls = 0
-    try:
-        data    = serpapi_get({"engine": "google_maps", "q": keyword, "type": "search"})
-        calls += 1
-        results = data.get("local_results", [])
-
-        if not results:
-            return [], calls
-
-        for place in results[:max_locations]:
-            data_id       = place.get("data_id", "")
-            place_name    = place.get("title", keyword)
-            raw_address   = place.get("address", "")
-
-            gps  = place.get("gps_coordinates") or {}
-            lat  = gps.get("latitude")  or place.get("latitude")  or place.get("lat") or ""
-            lon  = gps.get("longitude") or place.get("longitude") or place.get("lng") or place.get("lon") or ""
-
-            google_rating = place.get("rating", "")
-            total_reviews = place.get("reviews", "")
-
-            city, state = parse_address(raw_address, search_term=keyword)
-
-            if not data_id:
+            place_id = place.get("place_id")
+            if not place_id or place_id in seen_place_ids:
                 continue
 
-            next_token = None
-            location_reviews = []
+            seen_place_ids.add(place_id)
 
-            for page in range(max_pages):
-                params = {"engine":"google_maps_reviews","data_id":data_id,"sort_by":"newestFirst","hl":"en"}
-                if next_token:
-                    params["next_page_token"] = next_token
+            # Get full details including reviews
+            try:
+                details = gmaps.place(
+                    place_id=place_id,
+                    fields=[
+                        "name", "formatted_address", "geometry",
+                        "rating", "user_ratings_total", "reviews",
+                        "address_components", "business_status",
+                    ]
+                ).get("result", {})
+            except Exception as e:
+                print(f"   Warning: details failed for {place_id}: {e}")
+                continue
 
-                try:
-                    rdata = serpapi_get(params)
-                    calls += 1
-                    raw   = rdata.get("reviews", [])
-                    if not raw:
-                        break
+            # Extract state from address components (US only filter)
+            addr_components = details.get("address_components", [])
+            loc_state = ""
+            loc_city  = ""
+            loc_zip   = ""
+            country   = ""
+            for comp in addr_components:
+                types = comp.get("types", [])
+                if "administrative_area_level_1" in types:
+                    loc_state = comp.get("short_name", "")
+                if "locality" in types:
+                    loc_city = comp.get("long_name", "")
+                if "postal_code" in types:
+                    loc_zip = comp.get("long_name", "")
+                if "country" in types:
+                    country = comp.get("short_name", "")
 
-                    for r in raw:
-                        text = r.get("snippet", "").replace("\n", " ").strip()
-                        if not text:
-                            continue
-                        location_reviews.append({
-                            "review_id":  r.get("review_id", f"{data_id}_{len(location_reviews)}"),
-                            "stars":      str(r.get("rating", "")),
-                            "date":       parse_relative_date(r.get("date", "")),
-                            "title":      "",
-                            "text":       text,
-                            "source":     "google_maps",
-                            "product":    place_name,
-                            "version":    "",
-                            "vote_count": str(r.get("likes", 0)),
-                            "place_name": place_name,
-                            "address":    raw_address,
-                            "city":       city,
-                            "state":      state,
-                            "latitude":   str(lat),
-                            "longitude":  str(lon),
-                            "google_rating":              str(google_rating),
-                            "total_reviews_at_location":  str(total_reviews),
-                        })
+            # Skip non-US results
+            if country and country != "US":
+                continue
 
-                    next_token = rdata.get("serpapi_pagination", {}).get("next_page_token", "")
-                    if not next_token:
-                        break
-                    time.sleep(0.3)
+            geo = details.get("geometry", {}).get("location", {})
+            biz_id = make_id("google", place_id)
 
-                except Exception:
-                    break
+            businesses.append({
+                "business_id":  biz_id,
+                "name":         details.get("name", ""),
+                "address":      details.get("formatted_address", ""),
+                "city":         loc_city,
+                "state":        loc_state,
+                "postal_code":  loc_zip,
+                "latitude":     geo.get("lat", ""),
+                "longitude":    geo.get("lng", ""),
+                "stars":        details.get("rating", ""),
+                "review_count": details.get("user_ratings_total", 0),
+                "is_open":      1 if details.get("business_status") == "OPERATIONAL" else 0,
+                "source":       "google",
+            })
 
-            if location_reviews:
-                print(f"      {place_name} ({city}, {state}): {len(location_reviews)} reviews")
-            reviews.extend(location_reviews)
-            time.sleep(0.3)
+            # Reviews (Google Places returns up to 5)
+            for r in details.get("reviews", [])[:GOOGLE_REVIEWS_PER_LOC]:
+                date_str = datetime.utcfromtimestamp(
+                    r.get("time", 0)
+                ).strftime("%Y-%m-%d")
 
-    except Exception as ex:
-        print(f"   Error for '{keyword}': {ex}")
+                reviews.append({
+                    "review_id":   make_id("google", place_id, r.get("author_name", ""), date_str),
+                    "business_id": biz_id,
+                    "user_id":     r.get("author_name", "anonymous"),
+                    "stars":       r.get("rating", ""),
+                    "date":        date_str,
+                    "text":        r.get("text", "").replace("\n", " ").strip(),
+                    "useful":      0,
+                    "funny":       0,
+                    "cool":        0,
+                    "source":      "google",
+                    "app_version": "",
+                })
 
-    return reviews, calls
-
-
-def scrape_serpapi():
-    if not SERPAPI_KEY:
-        print("\n🌍 SERPAPI_KEY not set - skipping Google Maps.")
-        return []
-
-    print(f"\n🌍 Scraping Google Maps reviews for: {BRAND_NAME} (nationwide)...")
-    all_reviews = []
-    seen_ids    = set()
-
-    search_terms = []
-    for kw in KEYWORDS:
-        for state in US_STATES:
-            search_terms.append(f"{kw} {state}")
-
-    print(f"   Searching state-targeted queries (capped for API budget)...")
-
-    queries_run    = 0
-    max_queries    = 12
-    api_calls_used = 0
-    max_api_calls  = 90
-
-    for term in search_terms:
-        if queries_run >= max_queries:
-            break
-        if api_calls_used >= max_api_calls:
-            print(f"   ⚠️  Approaching API budget limit ({api_calls_used} calls) - stopping early.")
-            break
-        if len(all_reviews) >= 300:
-            break
-
-        reviews, calls_made = scrape_location_reviews(term, max_locations=1, max_pages=1)
-        queries_run    += 1
-        api_calls_used += calls_made
-
-        for r in reviews:
-            if r["review_id"] not in seen_ids:
-                seen_ids.add(r["review_id"])
-                all_reviews.append(r)
-
-        time.sleep(0.3)
-
-    print(f"\n   ✅ Google Maps: {len(all_reviews)} unique reviews from {queries_run} queries ({api_calls_used} API calls used)")
-
-    if all_reviews:
-        states_found = set(r["state"] for r in all_reviews if r["state"])
-        print(f"   📍 States covered: {sorted(states_found)}")
-
-    return all_reviews
+    print(f"   Google Maps: {len(businesses)} locations, {len(reviews)} reviews collected ✅")
+    return businesses, reviews
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
-def save_reviews(reviews):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(REVIEWS_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(reviews)
-    print(f"\n   💾 Saved {len(reviews)} reviews → {REVIEWS_CSV}")
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 55)
-    print(f"  Smart Data Extractor - {BRAND_NAME}")
-    print("  Combines App Store + Google Maps automatically")
+    print("  Smart Data Extractor")
+    print(f"  {PLATFORM_TITLE}")
+    print("  Combines App Store + Google Maps (US only)")
     print("=" * 55)
 
-    all_reviews = []
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-    app_reviews = scrape_app_store()
-    all_reviews.extend(app_reviews)
+    all_businesses = []
+    all_reviews    = []
 
-    maps_reviews = scrape_serpapi()
-    all_reviews.extend(maps_reviews)
+    # --- App Store ---
+    print("\n📱 App Store")
+    biz, rev = extract_app_store()
+    all_businesses.extend(biz)
+    all_reviews.extend(rev)
 
+    # --- Google Maps ---
+    print("\n🌍 Google Maps")
+    biz, rev = extract_google_maps()
+    all_businesses.extend(biz)
+    all_reviews.extend(rev)
+
+    # --- Save ---
     if not all_reviews:
         print("\n⚠️  No reviews collected from any source.")
-        print("   Check APP_STORE_ID and SERPAPI_KEY in config.py / GitHub Secrets")
+        print("   Check APP_STORE_ID and GOOGLE_PLACES_API_KEY in config.py / .env")
         sys.exit(1)
 
-    save_reviews(all_reviews)
+    biz_df = pd.DataFrame(all_businesses).drop_duplicates(subset=["business_id"])
+    rev_df = pd.DataFrame(all_reviews).drop_duplicates(subset=["review_id"])
 
-    sources = {}
-    for r in all_reviews:
-        src = r.get("source", "unknown")
-        sources[src] = sources.get(src, 0) + 1
+    biz_df.to_csv(BUSINESSES_CSV, index=False)
+    rev_df.to_csv(REVIEWS_CSV, index=False)
 
+    print(f"\n✅ Saved {len(biz_df)} locations → {BUSINESSES_CSV}")
+    print(f"✅ Saved {len(rev_df):,} reviews  → {REVIEWS_CSV}")
+
+    # Summary
+    avg = rev_df["stars"].apply(pd.to_numeric, errors="coerce").mean()
+    sources = rev_df["source"].value_counts().to_dict()
+    print(f"\n   Avg rating : {avg:.2f} ⭐")
+    print(f"   By source  : {sources}")
     print("\n" + "=" * 55)
-    print(f"  ✅ Done - {len(all_reviews)} total reviews")
-    for src, count in sources.items():
-        print(f"     {src}: {count}")
-    print("=" * 55)
+    print("  Done. Run: streamlit run main_app.py")
+    print("=" * 55 + "\n")
 
 
 if __name__ == "__main__":
