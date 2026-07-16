@@ -17,7 +17,6 @@ from config import REVIEWS_CSV, BUSINESSES_CSV, PEER_GROUP_COLUMN, SIGNIFICANT_D
 
 
 def add_jitter(series: pd.Series, amount: float = 0.018) -> pd.Series:
-    """Add tiny random offset so overlapping pins separate visually."""
     np.random.seed(42)
     return series + np.random.uniform(-amount, amount, size=len(series))
 
@@ -38,9 +37,12 @@ def load_and_process(brand_id: str = None):
         if brand_id and "brand_id" in reviews.columns:
             reviews = reviews[reviews["brand_id"] == brand_id]
 
-        agg = (reviews.groupby("business_id")["stars"]
+        # Aggregate reviews by place_name (new schema) or business_id (old schema)
+        loc_col = "business_id" if "business_id" in reviews.columns else "place_name"
+        agg = (reviews.groupby(loc_col)["stars"]
                .agg(avg_rating="mean", review_count="count")
-               .reset_index())
+               .reset_index()
+               .rename(columns={loc_col: "business_id"}))
 
         if "review_count" in biz.columns:
             biz = biz.drop(columns=["review_count"])
@@ -69,17 +71,17 @@ def load_and_process(brand_id: str = None):
 
     biz["status"] = biz["vs_peer"].apply(status)
 
-    # Store original lat/lon for tooltip, jitter display coords
     biz["lat_display"] = add_jitter(biz["latitude"])
     biz["lon_display"] = add_jitter(biz["longitude"])
 
-    biz["label"] = (biz.get("name", biz["business_id"]).astype(str)
-                    + "<br>" + biz.get("address", "").astype(str)
-                    + "<br>" + biz.get("city", "").astype(str)
-                    + ", " + biz.get("state", "").astype(str))
+    # Fix 1: use "name" fallback instead of "business_id"
+    biz["label"] = (biz["name"].astype(str)
+                    + "<br>" + biz.get("address", pd.Series("", index=biz.index)).astype(str)
+                    + "<br>" + biz.get("city", pd.Series("", index=biz.index)).astype(str)
+                    + ", " + biz.get("state", pd.Series("", index=biz.index)).astype(str))
 
-    biz["short_label"] = (biz.get("city", "").astype(str)
-                          + ", " + biz.get("state", "").astype(str)
+    biz["short_label"] = (biz.get("city", pd.Series("", index=biz.index)).astype(str)
+                          + ", " + biz.get("state", pd.Series("", index=biz.index)).astype(str)
                           + "  " + biz["avg_rating"].round(1).astype(str) + "⭐")
 
     return biz, reviews
@@ -103,7 +105,6 @@ def show():
                  "```\npython module1_voice_of_customer/01_extract_reviews.py\n```")
         return
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🗺️ Map Filters")
     states = sorted(biz["state"].dropna().unique()) if "state" in biz.columns else []
     sel_states = st.sidebar.multiselect("States", options=states, default=states)
@@ -121,7 +122,6 @@ def show():
         index=0,
     )
 
-    # ── Filter ────────────────────────────────────────────────────────────────
     mask = biz["status"].isin(sel_status) & (biz["review_count"] >= min_rev)
     if sel_states:
         mask &= biz["state"].isin(sel_states)
@@ -131,7 +131,6 @@ def show():
         st.warning("No locations match filters. Try lowering the min reviews slider.")
         return
 
-    # ── KPIs ──────────────────────────────────────────────────────────────────
     c1,c2,c3,c4,c5,c6 = st.columns(6)
     c1.metric("Locations",     len(filtered))
     c2.metric("Avg Rating",    f"{filtered['avg_rating'].mean():.2f} ⭐")
@@ -144,9 +143,7 @@ def show():
 
     color_map = {"Above Peer":"#1D9E75","On Par":"#F59E0B","Below Peer":"#E24B4A"}
 
-    # ── Map ───────────────────────────────────────────────────────────────────
     if "Cluster" in view_mode:
-        # Cluster mode: one trace per status, use cluster marker
         fig = go.Figure()
         for status_val, color in color_map.items():
             sub = filtered[filtered["status"] == status_val]
@@ -156,25 +153,16 @@ def show():
                 lat=sub["lat_display"],
                 lon=sub["lon_display"],
                 mode="markers",
-                marker=go.scattermapbox.Marker(
-                    size=14,
-                    color=color,
-                    opacity=0.85,
-                ),
-                cluster=dict(
-                    enabled=True,
-                    color=color,
-                    size=20,
-                    step=3,
-                ),
+                marker=go.scattermapbox.Marker(size=14, color=color, opacity=0.85),
+                cluster=dict(enabled=True, color=color, size=20, step=3),
                 text=sub["label"],
                 customdata=np.stack([
                     sub["avg_rating"].round(2),
                     sub["peer_avg"].round(2),
                     sub["vs_peer"],
                     sub["review_count"],
-                    sub.get("city", sub["business_id"]),
-                    sub.get("state", ""),
+                    sub["city"].fillna(""),        # Fix 2: direct column access
+                    sub["state"].fillna(""),
                 ], axis=-1),
                 hovertemplate=(
                     "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
@@ -185,7 +173,6 @@ def show():
                 ),
                 name=status_val,
             ))
-
         fig.update_layout(
             mapbox_style="carto-positron",
             mapbox_zoom=3.5,
@@ -197,12 +184,10 @@ def show():
         )
 
     else:
-        # Individual jittered pins - sized by review count, colored by status
         filtered["marker_size"] = np.clip(
             8 + (filtered["review_count"] / filtered["review_count"].max()) * 14,
             8, 22
         )
-
         fig = go.Figure()
         for status_val, color in color_map.items():
             sub = filtered[filtered["status"] == status_val]
@@ -212,11 +197,7 @@ def show():
                 lat=sub["lat_display"],
                 lon=sub["lon_display"],
                 mode="markers+text",
-                marker=go.scattermapbox.Marker(
-                    size=sub["marker_size"],
-                    color=color,
-                    opacity=0.88,
-                ),
+                marker=go.scattermapbox.Marker(size=sub["marker_size"], color=color, opacity=0.88),
                 text=sub["avg_rating"].round(1).astype(str) + "⭐",
                 textposition="top right",
                 textfont=dict(size=9, color="#333"),
@@ -225,9 +206,9 @@ def show():
                     sub["peer_avg"].round(2),
                     sub["vs_peer"],
                     sub["review_count"],
-                    sub.get("city", sub["business_id"]),
-                    sub.get("state", ""),
-                    sub.get("address", ""),
+                    sub["city"].fillna(""),        # Fix 2: direct column access
+                    sub["state"].fillna(""),
+                    sub["address"].fillna(""),
                 ], axis=-1),
                 hovertemplate=(
                     "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
@@ -240,7 +221,6 @@ def show():
                 ),
                 name=status_val,
             ))
-
         fig.update_layout(
             mapbox_style="carto-positron",
             mapbox_zoom=3.8,
@@ -260,7 +240,6 @@ def show():
     st.caption("💡 Tip: Pins are slightly spread so overlapping stores are individually visible. "
                "Hover for full address and rating details. Switch to Cluster mode in the sidebar to see density.")
 
-    # ── Attention table ───────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🔴 Locations Needing Most Attention")
     st.caption("Stores furthest below their state peer average - priority Field Leader calls.")
@@ -283,7 +262,6 @@ def show():
             "review_count": st.column_config.NumberColumn("Reviews"),
         }, use_container_width=True, hide_index=True)
 
-    # ── Top performers ────────────────────────────────────────────────────────
     st.markdown("### 🟢 Top Performing Locations")
     st.caption("Best-practice targets - stores significantly outperforming their state peers.")
 
@@ -304,13 +282,12 @@ def show():
             "review_count": st.column_config.NumberColumn("Reviews"),
         }, use_container_width=True, hide_index=True)
 
-    # ── State bar chart ───────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📊 Average Rating by State")
 
     if "state" in filtered.columns:
         sa = (filtered.groupby("state")
-              .agg(avg_rating=("avg_rating","mean"), locations=("business_id","count"))
+              .agg(avg_rating=("avg_rating","mean"), locations=("name","count"))  # Fix 3: use "name"
               .sort_values("avg_rating", ascending=False).reset_index())
         sa["avg_rating"] = sa["avg_rating"].round(2)
         chain_avg = filtered["avg_rating"].mean()
@@ -340,8 +317,10 @@ def show():
     # ── Rating over time ──────────────────────────────────────────────────────
     if reviews is not None:
         st.markdown("### 📈 Rating Trend Over Time")
-        biz_ids = filtered["business_id"].tolist()
-        rev_f = reviews[reviews["business_id"].isin(biz_ids)].copy()
+        # Fix 3: filter reviews by selected states instead of business_id
+        rev_f = reviews.copy()
+        if sel_states and "state" in rev_f.columns:
+            rev_f = rev_f[rev_f["state"].isin(sel_states)]
         if not rev_f.empty and "date" in rev_f.columns:
             monthly = (rev_f.set_index("date")["stars"]
                        .resample("ME").mean().reset_index())
