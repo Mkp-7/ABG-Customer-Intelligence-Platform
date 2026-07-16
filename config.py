@@ -10,7 +10,15 @@ KEYWORDS     = [
     "Budget car rental",
     "Zipcar",
 ]
-APP_STORE_ID = ""          # auto-discovery will find their app
+# For Avis
+APP_STORE_ID = "308342527"
+GOOGLE_SEARCH_QUERY = None  # not needed anymore
+
+# For Budget
+APP_STORE_ID = "538787758"
+
+# For Zipcar
+APP_STORE_ID = "329384702"
 APP_COUNTRY  = "us"
 
 PLATFORM_TITLE    = "ABG Intelligence Platform"
