@@ -1,129 +1,58 @@
 """
-Step 1 - Extract reviews from App Store and/or Google Maps (US only).
+Smart Data Extractor — Multi-Brand
+Combines multiple sources automatically per brand:
+  1. Apple App Store — iTunes RSS feed (no library, no API key needed)
+  2. Google Maps     — Google Places API (free $200/month credit, no call limits)
 
-Data sources used (both free):
-  • App Store
-  • Google Maps
-Loops through all brands defined in config.py → BRANDS list.
+GOOGLE_PLACES_API_KEY must be set in GitHub Secrets / Streamlit Secrets.
+Get key: console.cloud.google.com → enable Places API
 
 Usage:
     python module1_voice_of_customer/01_extract_reviews.py
 
 Output:
-    data/businesses.csv   (all brands combined, tagged with brand_id)
-    data/reviews.csv      (all brands combined, tagged with brand_id)
+    data/reviews.csv      (all brands, all sources)
+    data/businesses.csv   (Google Maps locations per brand)
 """
 
-import os
-import sys
-import hashlib
+import os, sys, csv, json, time, re, hashlib
+import urllib.request, urllib.parse, urllib.error
 from datetime import datetime
-
-import pandas as pd
-from dotenv import load_dotenv
-
-load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     BRANDS,
-    APP_STORE_COUNTRY,
-    APP_STORE_MAX_REVIEWS,
+    APP_COUNTRY,
+    MAX_REVIEW_PAGES,
     GOOGLE_MAX_LOCATIONS,
     GOOGLE_REVIEWS_PER_LOC,
-    BUSINESSES_CSV,
-    REVIEWS_CSV,
     DATA_DIR,
+    REVIEWS_CSV,
+    BUSINESSES_CSV,
 )
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    def tqdm(iterable, **kwargs):
-        return iterable
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+REVIEW_FIELDS = [
+    "review_id", "brand_id", "brand_name", "stars", "date", "title", "text",
+    "source", "version", "vote_count",
+    "place_name", "address", "city", "state",
+    "latitude", "longitude", "google_rating", "total_reviews_at_location",
+]
 
-def make_id(*parts) -> str:
-    raw = "_".join(str(p) for p in parts)
-    return hashlib.md5(raw.encode()).hexdigest()[:16]
-
-
-# ── Source 1: App Store ───────────────────────────────────────────────────────
-
-def extract_app_store(brand: dict) -> tuple[list[dict], list[dict]]:
-    """Pull iOS App Store reviews for one brand."""
-    app_id = brand.get("app_store_id")
-    if not app_id:
-        print(f"   [{brand['name']}] App Store: skipped (no app_store_id)")
-        return [], []
-
-    try:
-        from app_store_scraper import AppStore
-    except ImportError:
-        print("   ERROR: run  pip install app-store-scraper")
-        return [], []
-
-    print(f"   [{brand['name']}] App Store: fetching up to {APP_STORE_MAX_REVIEWS} reviews (ID: {app_id})...")
-
-    scraper = AppStore(
-        country=APP_STORE_COUNTRY,
-        app_name=brand["name"].lower().replace(" ", "-"),
-        app_id=app_id,
-    )
-    scraper.review(how_many=APP_STORE_MAX_REVIEWS)
-
-    raw = scraper.reviews or []
-    if not raw:
-        print(f"   [{brand['name']}] App Store: 0 reviews returned.")
-        return [], []
-
-    biz_id = f"appstore_{app_id}"
-
-    businesses = [{
-        "business_id":  biz_id,
-        "brand_id":     brand["brand_id"],
-        "brand_name":   brand["name"],
-        "name":         f"{brand['name']} (App Store)",
-        "address":      "",
-        "city":         "",
-        "state":        "APP",
-        "postal_code":  "",
-        "latitude":     "",
-        "longitude":    "",
-        "stars":        round(sum(r.get("rating", 0) for r in raw) / len(raw), 2),
-        "review_count": len(raw),
-        "is_open":      1,
-        "source":       "appstore",
-    }]
-
-    reviews = []
-    for r in raw:
-        date_val = r.get("date", "")
-        date_str = date_val.strftime("%Y-%m-%d") if isinstance(date_val, datetime) else str(date_val)[:10]
-
-        reviews.append({
-            "review_id":   make_id(biz_id, r.get("userName", ""), date_str),
-            "business_id": biz_id,
-            "brand_id":    brand["brand_id"],
-            "brand_name":  brand["name"],
-            "user_id":     r.get("userName", "anonymous"),
-            "stars":       r.get("rating", ""),
-            "date":        date_str,
-            "text":        (r.get("review") or r.get("title") or "").replace("\n", " ").strip(),
-            "useful":      0,
-            "funny":       0,
-            "cool":        0,
-            "source":      "appstore",
-            "app_version": r.get("version", ""),
-        })
-
-    print(f"   [{brand['name']}] App Store: {len(reviews)} reviews ✅")
-    return businesses, reviews
-
-
-# ── Source 2: Google Maps ─────────────────────────────────────────────────────
+BIZ_FIELDS = [
+    "business_id", "brand_id", "brand_name", "name",
+    "address", "city", "state", "postal_code",
+    "latitude", "longitude", "stars", "review_count", "is_open", "source",
+]
 
 US_STATES = [
     "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -137,174 +66,257 @@ US_STATES = [
 ]
 
 
-def extract_google_maps(brand: dict, gmaps) -> tuple[list[dict], list[dict]]:
-    """Pull Google Maps reviews for one brand."""
-    query = brand.get("google_query")
-    if not query:
-        print(f"   [{brand['name']}] Google Maps: skipped (no google_query)")
-        return [], []
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    print(f"   [{brand['name']}] Google Maps: searching '{query}' across US states...")
-    print(f"   Cap: {GOOGLE_MAX_LOCATIONS} locations, {GOOGLE_REVIEWS_PER_LOC} reviews each")
+def make_id(*parts) -> str:
+    return hashlib.md5("_".join(str(p) for p in parts).encode()).hexdigest()[:16]
 
-    seen_place_ids = set()
-    businesses = []
+def fetch_url(url, timeout=20):
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8")
+
+
+# ── Source 1: Apple App Store (iTunes RSS — no library, no API key) ───────────
+
+def scrape_app_store(brand: dict) -> list[dict]:
+    app_id = brand.get("app_store_id", "").strip()
+    if not app_id:
+        print(f"   [{brand['name']}] App Store: skipped (no app_store_id)")
+        return []
+
+    print(f"\n   [{brand['name']}] 📱 App Store (ID: {app_id})...")
     reviews = []
 
-    for state in tqdm(US_STATES, desc=f"   {brand['name']} states"):
-        if len(seen_place_ids) >= GOOGLE_MAX_LOCATIONS:
+    for page in range(1, MAX_REVIEW_PAGES + 1):
+        url = (
+            f"https://itunes.apple.com/{APP_COUNTRY}/rss/customerreviews"
+            f"/page={page}/id={app_id}/sortby=mostrecent/json"
+        )
+        try:
+            data    = json.loads(fetch_url(url))
+            entries = data.get("feed", {}).get("entry", [])
+            if page == 1 and entries:
+                entries = entries[1:]   # first entry is app metadata, not a review
+            if not entries:
+                break
+            for e in entries:
+                reviews.append({
+                    "review_id":  make_id("appstore", app_id, e.get("id",{}).get("label","")),
+                    "brand_id":   brand["brand_id"],
+                    "brand_name": brand["name"],
+                    "stars":      e.get("im:rating",{}).get("label",""),
+                    "date":       e.get("updated",{}).get("label","")[:10],
+                    "title":      e.get("title",{}).get("label",""),
+                    "text":       e.get("content",{}).get("label","").replace("\n"," ").strip(),
+                    "source":     "app_store",
+                    "version":    e.get("im:version",{}).get("label",""),
+                    "vote_count": e.get("im:voteCount",{}).get("label","0"),
+                    "place_name": "", "address": "", "city": "", "state": "",
+                    "latitude": "", "longitude": "", "google_rating": "",
+                    "total_reviews_at_location": "",
+                })
+            print(f"      Page {page}: {len(entries)} reviews (total so far: {len(reviews)})")
+            time.sleep(0.5)
+        except Exception as ex:
+            print(f"      Page {page}: {ex} — stopping.")
             break
 
-        try:
-            result = gmaps.places(query=f"{query} {state} USA", region="us")
-        except Exception as e:
-            print(f"   Warning: search failed for {state}: {e}")
-            continue
+    print(f"   [{brand['name']}] App Store: {len(reviews)} reviews ✅")
+    return reviews
 
-        for place in result.get("results", []):
+
+# ── Source 2: Google Maps via Places API ──────────────────────────────────────
+
+def places_api(endpoint: str, params: dict) -> dict:
+    params["key"] = GOOGLE_PLACES_API_KEY
+    url = f"https://maps.googleapis.com/maps/api/place/{endpoint}/json?{urllib.parse.urlencode(params)}"
+    return json.loads(fetch_url(url))
+
+def scrape_google_maps(brand: dict) -> tuple[list[dict], list[dict]]:
+    keywords = brand.get("keywords", [])
+    if not keywords:
+        print(f"   [{brand['name']}] Google Maps: skipped (no keywords)")
+        return [], []
+    if not GOOGLE_PLACES_API_KEY:
+        print(f"   [{brand['name']}] Google Maps: skipped (GOOGLE_PLACES_API_KEY not set)")
+        return [], []
+
+    print(f"\n   [{brand['name']}] 🌍 Google Maps (Places API, nationwide)...")
+
+    all_reviews    = []
+    all_businesses = []
+    seen_place_ids = set()
+
+    for keyword in keywords:
+        for state in US_STATES:
             if len(seen_place_ids) >= GOOGLE_MAX_LOCATIONS:
                 break
 
-            place_id = place.get("place_id")
-            if not place_id or place_id in seen_place_ids:
-                continue
-            seen_place_ids.add(place_id)
-
+            query = f"{keyword} {state} USA"
             try:
-                details = gmaps.place(
-                    place_id=place_id,
-                    fields=[
-                        "name", "formatted_address", "geometry",
-                        "rating", "user_ratings_total", "reviews",
-                        "address_components", "business_status",
-                    ]
-                ).get("result", {})
+                data    = places_api("textsearch", {"query": query, "region": "us"})
+                results = data.get("results", [])
             except Exception as e:
-                print(f"   Warning: details failed for {place_id}: {e}")
+                print(f"      Warning: search failed for {state}: {e}")
                 continue
 
-            loc_state = loc_city = loc_zip = country = ""
-            for comp in details.get("address_components", []):
-                types = comp.get("types", [])
-                if "administrative_area_level_1" in types:
-                    loc_state = comp.get("short_name", "")
-                if "locality" in types:
-                    loc_city = comp.get("long_name", "")
-                if "postal_code" in types:
-                    loc_zip = comp.get("long_name", "")
-                if "country" in types:
-                    country = comp.get("short_name", "")
+            for place in results:
+                if len(seen_place_ids) >= GOOGLE_MAX_LOCATIONS:
+                    break
 
-            if country and country != "US":
-                continue
+                place_id = place.get("place_id")
+                if not place_id or place_id in seen_place_ids:
+                    continue
+                seen_place_ids.add(place_id)
 
-            geo    = details.get("geometry", {}).get("location", {})
-            biz_id = make_id("google", place_id)
+                try:
+                    det = places_api("details", {
+                        "place_id": place_id,
+                        "fields": "name,formatted_address,geometry,rating,"
+                                  "user_ratings_total,reviews,address_components,business_status",
+                    }).get("result", {})
+                except Exception as e:
+                    print(f"      Warning: details failed for {place_id}: {e}")
+                    continue
 
-            businesses.append({
-                "business_id":  biz_id,
-                "brand_id":     brand["brand_id"],
-                "brand_name":   brand["name"],
-                "name":         details.get("name", ""),
-                "address":      details.get("formatted_address", ""),
-                "city":         loc_city,
-                "state":        loc_state,
-                "postal_code":  loc_zip,
-                "latitude":     geo.get("lat", ""),
-                "longitude":    geo.get("lng", ""),
-                "stars":        details.get("rating", ""),
-                "review_count": details.get("user_ratings_total", 0),
-                "is_open":      1 if details.get("business_status") == "OPERATIONAL" else 0,
-                "source":       "google",
-                "app_version":  "",
-            })
+                # Parse address components — US only
+                loc_state = loc_city = loc_zip = country = ""
+                for comp in det.get("address_components", []):
+                    types = comp.get("types", [])
+                    if "administrative_area_level_1" in types:
+                        loc_state = comp.get("short_name", "")
+                    if "locality" in types:
+                        loc_city = comp.get("long_name", "")
+                    if "postal_code" in types:
+                        loc_zip = comp.get("long_name", "")
+                    if "country" in types:
+                        country = comp.get("short_name", "")
 
-            for r in details.get("reviews", [])[:GOOGLE_REVIEWS_PER_LOC]:
-                date_str = datetime.utcfromtimestamp(r.get("time", 0)).strftime("%Y-%m-%d")
-                reviews.append({
-                    "review_id":   make_id("google", place_id, r.get("author_name", ""), date_str),
-                    "business_id": biz_id,
-                    "brand_id":    brand["brand_id"],
-                    "brand_name":  brand["name"],
-                    "user_id":     r.get("author_name", "anonymous"),
-                    "stars":       r.get("rating", ""),
-                    "date":        date_str,
-                    "text":        r.get("text", "").replace("\n", " ").strip(),
-                    "useful":      0,
-                    "funny":       0,
-                    "cool":        0,
-                    "source":      "google",
-                    "app_version": "",
+                if country and country != "US":
+                    continue
+
+                geo    = det.get("geometry", {}).get("location", {})
+                biz_id = make_id("google", place_id)
+
+                all_businesses.append({
+                    "business_id":  biz_id,
+                    "brand_id":     brand["brand_id"],
+                    "brand_name":   brand["name"],
+                    "name":         det.get("name", ""),
+                    "address":      det.get("formatted_address", ""),
+                    "city":         loc_city,
+                    "state":        loc_state,
+                    "postal_code":  loc_zip,
+                    "latitude":     geo.get("lat", ""),
+                    "longitude":    geo.get("lng", ""),
+                    "stars":        det.get("rating", ""),
+                    "review_count": det.get("user_ratings_total", 0),
+                    "is_open":      1 if det.get("business_status") == "OPERATIONAL" else 0,
+                    "source":       "google",
                 })
 
-    print(f"   [{brand['name']}] Google Maps: {len(businesses)} locations, {len(reviews)} reviews ✅")
-    return businesses, reviews
+                for r in det.get("reviews", [])[:GOOGLE_REVIEWS_PER_LOC]:
+                    date_str = datetime.utcfromtimestamp(r.get("time", 0)).strftime("%Y-%m-%d")
+                    all_reviews.append({
+                        "review_id":  make_id("google", place_id, r.get("author_name",""), date_str),
+                        "brand_id":   brand["brand_id"],
+                        "brand_name": brand["name"],
+                        "stars":      str(r.get("rating","")),
+                        "date":       date_str,
+                        "title":      "",
+                        "text":       r.get("text","").replace("\n"," ").strip(),
+                        "source":     "google_maps",
+                        "version":    "",
+                        "vote_count": str(r.get("likes", 0)),
+                        "place_name": det.get("name",""),
+                        "address":    det.get("formatted_address",""),
+                        "city":       loc_city,
+                        "state":      loc_state,
+                        "latitude":   str(geo.get("lat","")),
+                        "longitude":  str(geo.get("lng","")),
+                        "google_rating":             str(det.get("rating","")),
+                        "total_reviews_at_location": str(det.get("user_ratings_total","")),
+                    })
+
+                time.sleep(0.2)
+
+    states_found = sorted(set(r["state"] for r in all_reviews if r["state"]))
+    print(f"   [{brand['name']}] Google Maps: {len(all_reviews)} reviews, "
+          f"{len(all_businesses)} locations ✅")
+    if states_found:
+        print(f"      States: {states_found}")
+
+    return all_reviews, all_businesses
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 55)
-    print("  Smart Data Extractor - Multi-Brand")
+    print("  Smart Data Extractor — Multi-Brand")
     print(f"  Brands: {', '.join(b['name'] for b in BRANDS)}")
-    print("  Sources: App Store + Google Maps (US only)")
+    print("  Sources: App Store (iTunes RSS) + Google Maps (Places API)")
     print("=" * 55)
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Init Google Maps client once (shared across brands)
-    api_key = os.environ.get("GOOGLE_PLACES_API_KEY")
-    gmaps = None
-    if api_key:
-        try:
-            import googlemaps
-            gmaps = googlemaps.Client(key=api_key)
-        except ImportError:
-            print("⚠️  googlemaps not installed. Run: pip install googlemaps")
-    else:
-        print("⚠️  GOOGLE_PLACES_API_KEY not set - Google Maps will be skipped for all brands.")
-
-    all_businesses = []
     all_reviews    = []
+    all_businesses = []
 
     for brand in BRANDS:
         print(f"\n{'─'*55}")
         print(f"  🏷  {brand['name'].upper()}")
         print(f"{'─'*55}")
 
-        # App Store
-        biz, rev = extract_app_store(brand)
-        all_businesses.extend(biz)
+        all_reviews.extend(scrape_app_store(brand))
+
+        rev, biz = scrape_google_maps(brand)
         all_reviews.extend(rev)
+        all_businesses.extend(biz)
 
-        # Google Maps
-        if gmaps:
-            biz, rev = extract_google_maps(brand, gmaps)
-            all_businesses.extend(biz)
-            all_reviews.extend(rev)
-
-    # ── Save ──────────────────────────────────────────────────────────────────
     if not all_reviews:
         print("\n⚠️  No reviews collected from any source.")
-        print("   Check app_store_id values in BRANDS and GOOGLE_PLACES_API_KEY secret.")
+        print("   Check app_store_id in BRANDS and GOOGLE_PLACES_API_KEY in GitHub Secrets.")
         sys.exit(1)
 
-    biz_df = pd.DataFrame(all_businesses).drop_duplicates(subset=["business_id"])
-    rev_df = pd.DataFrame(all_reviews).drop_duplicates(subset=["review_id"])
+    # Deduplicate and save reviews
+    seen, unique_reviews = set(), []
+    for r in all_reviews:
+        if r["review_id"] not in seen:
+            seen.add(r["review_id"])
+            unique_reviews.append(r)
 
-    biz_df.to_csv(BUSINESSES_CSV, index=False)
-    rev_df.to_csv(REVIEWS_CSV, index=False)
+    with open(REVIEWS_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=REVIEW_FIELDS)
+        writer.writeheader()
+        writer.writerows(unique_reviews)
+
+    # Deduplicate and save businesses
+    seen, unique_biz = set(), []
+    for b in all_businesses:
+        if b["business_id"] not in seen:
+            seen.add(b["business_id"])
+            unique_biz.append(b)
+
+    with open(BUSINESSES_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=BIZ_FIELDS)
+        writer.writeheader()
+        writer.writerows(unique_biz)
 
     print(f"\n{'='*55}")
-    print(f"✅ {len(biz_df)} locations  → {BUSINESSES_CSV}")
-    print(f"✅ {len(rev_df):,} reviews   → {REVIEWS_CSV}")
+    print(f"✅ {len(unique_reviews):,} reviews  → {REVIEWS_CSV}")
+    print(f"✅ {len(unique_biz)} locations → {BUSINESSES_CSV}")
 
     for brand in BRANDS:
-        br = rev_df[rev_df["brand_id"] == brand["brand_id"]]
-        if len(br):
-            avg = pd.to_numeric(br["stars"], errors="coerce").mean()
-            src = br["source"].value_counts().to_dict()
-            print(f"   {brand['name']}: {len(br):,} reviews | avg {avg:.2f}⭐ | {src}")
+        br    = [r for r in unique_reviews if r["brand_id"] == brand["brand_id"]]
+        stars = [float(r["stars"]) for r in br if str(r["stars"]).replace(".","").isdigit()]
+        avg   = round(sum(stars)/len(stars), 2) if stars else "N/A"
+        src   = {}
+        for r in br:
+            src[r["source"]] = src.get(r["source"], 0) + 1
+        if br:
+            print(f"   {brand['name']}: {len(br):,} reviews | avg {avg}⭐ | {src}")
 
     print(f"\n  Run: streamlit run main_app.py")
     print(f"{'='*55}\n")
