@@ -1,41 +1,37 @@
 """
-Configuration - edit ONLY these fields for each new brand.
+Configuration — edit this file to target any retail/service brand.
+
+To use with a different company:
+1. Update PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON
+2. Set APP_STORE_ID (or None to skip)
+3. Set GOOGLE_SEARCH_QUERY (or None to skip)
+4. Add GOOGLE_PLACES_API_KEY to your .env file
+5. Re-run: python module1_voice_of_customer/01_extract_reviews.py
 """
 
-# ── Brand Settings ──────────────────────────────────────────────────────────
-BRAND_NAME   = "Avis Budget Group"
-APP_NAME     = BRAND_NAME
-KEYWORDS     = [
-    "Avis car rental",
-    "Budget car rental",
-    "Zipcar",
-]
-# For Avis
-APP_STORE_ID = "308342527"
-GOOGLE_SEARCH_QUERY = None  # not needed anymore
+PLATFORM_TITLE    = "Retail Intelligence Platform"
+PLATFORM_SUBTITLE = "Customer Insights & Store Operations"
+PLATFORM_ICON     = "🏪"
 
-# For Budget
-APP_STORE_ID = "538787758"
-
-# For Zipcar
-APP_STORE_ID = "329384702"
-APP_COUNTRY  = "us"
-
-PLATFORM_TITLE    = "ABG Intelligence Platform"
-PLATFORM_SUBTITLE = "Customer Experience & Operations Analytics"
-PLATFORM_ICON     = "🚗"
-
-# ── AI Model ──────────────────────────────────────────────────────────────────
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# ── Scraper Settings ──────────────────────────────────────────────────────────
-MAX_REVIEW_PAGES = 10
-
-# ── Data Paths ────────────────────────────────────────────────────────────────
 DATA_DIR       = "data"
-REVIEWS_CSV    = "data/reviews.csv"
 BUSINESSES_CSV = "data/businesses.csv"
+REVIEWS_CSV    = "data/reviews.csv"
 
-# ── Analytics Settings ────────────────────────────────────────────────────────
-ANOMALY_THRESHOLD_STARS = 0.4
-SIGNIFICANT_DELTA_STARS = 0.15
+# ── App Store ─────────────────────────────────────────────────────────────────
+# No API key needed. Set to None to skip.
+APP_STORE_ID          = None    # e.g. "308342527" for Avis
+APP_STORE_COUNTRY     = "us"
+APP_STORE_MAX_REVIEWS = 2000
+
+# ── Google Maps (Places API) ──────────────────────────────────────────────────
+# Free $200/month credit → console.cloud.google.com → enable Places API
+GOOGLE_SEARCH_QUERY    = None   # e.g. "Avis car rental"
+GOOGLE_MAX_LOCATIONS   = 200
+GOOGLE_REVIEWS_PER_LOC = 5
+
+# ── Analysis Thresholds ───────────────────────────────────────────────────────
+ANOMALY_THRESHOLD_STARS  = 0.4
+PEER_GROUP_COLUMN        = "state"
+SIGNIFICANT_DELTA_STARS  = 0.3
