@@ -12,10 +12,8 @@ env/
 # Yelp data — never commit (license restriction)
 data/yelp_academic_dataset_business.json
 data/yelp_academic_dataset_review.json
-data/businesses.csv
-
-# App Store reviews ARE safe to commit (public data)
-# data/reviews.csv  ← intentionally NOT ignored
+*.tar
+*.tar.gz
 
 # Streamlit
 .streamlit/secrets.toml
