@@ -38,9 +38,14 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
 
     total   = len(df)
     avg     = df["stars"].mean()
-    d_min   = df["date"].min().strftime("%Y-%m-%d") if "date" in df.columns else "N/A"
-    d_max   = df["date"].max().strftime("%Y-%m-%d") if "date" in df.columns else "N/A"
-    locs    = df["business_id"].nunique()
+    if "date" in df.columns:
+        valid_dates = df["date"].dropna()
+        d_min = valid_dates.min().strftime("%Y-%m-%d") if len(valid_dates) else "N/A"
+        d_max = valid_dates.max().strftime("%Y-%m-%d") if len(valid_dates) else "N/A"
+    else:
+        d_min = d_max = "N/A"
+    loc_col = "business_id" if "business_id" in df.columns else "place_name"
+    locs    = df[loc_col].nunique() if loc_col in df.columns else "-"
 
     dist = df["stars"].value_counts().sort_index()
     dist_text = ", ".join([f"{int(k)} star: {int(v)} ({v/total*100:.1f}%)" for k,v in dist.items()])
