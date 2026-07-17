@@ -220,23 +220,29 @@ def load_home_kpis():
     if os.path.exists(rev_path):
         rev = pd.read_csv(rev_path, parse_dates=["date"])
         rev["stars"] = pd.to_numeric(rev["stars"], errors="coerce")
-        kpis["total_reviews"]   = len(rev)
-        kpis["avg_rating"]      = round(rev["stars"].mean(), 2)
-        kpis["pct_negative"]    = round((rev["stars"] <= 2).mean() * 100, 1)
-        kpis["pct_positive"]    = round((rev["stars"] >= 4).mean() * 100, 1)
-        loc_col = "business_id" if "business_id" in rev.columns else "place_name"
-        kpis["unique_locations"] = rev[loc_col].nunique() if loc_col in rev.columns else "-"
-        if "date" in rev.columns and not rev["date"].isna().all():
-            valid_dates = rev["date"].dropna()
-            kpis["date_min"] = valid_dates.min().strftime("%b %Y") if len(valid_dates) else "N/A"
-            kpis["date_max"] = valid_dates.max().strftime("%b %Y") if len(valid_dates) else "N/A"
-        else:
-            kpis["date_min"] = kpis["date_max"] = "N/A"
+
+        brand_ids = st.session_state.get("selected_brand_ids", [])
+        if brand_ids and "brand_id" in rev.columns:
+            rev = rev[rev["brand_id"].isin(brand_ids)]
+
+        kpis["total_reviews"] = len(rev)
+        kpis["avg_rating"]    = round(rev["stars"].mean(), 2) if len(rev) else 0
+        kpis["pct_negative"]  = round((rev["stars"] <= 2).mean() * 100, 1) if len(rev) else 0
+        kpis["pct_positive"]  = round((rev["stars"] >= 4).mean() * 100, 1) if len(rev) else 0
+        loc_col = "place_name" if "place_name" in rev.columns else (
+                  "business_id" if "business_id" in rev.columns else None)
+        kpis["unique_locations"] = rev[loc_col].nunique() if loc_col else "—"
+        valid_dates = rev["date"].dropna()
+        kpis["date_min"] = valid_dates.min().strftime("%b %Y") if len(valid_dates) else "N/A"
+        kpis["date_max"] = valid_dates.max().strftime("%b %Y") if len(valid_dates) else "N/A"
     else:
         kpis = None
 
     if os.path.exists(biz_path):
         biz = pd.read_csv(biz_path)
+        brand_ids = st.session_state.get("selected_brand_ids", [])
+        if brand_ids and "brand_id" in biz.columns:
+            biz = biz[biz["brand_id"].isin(brand_ids)]
         kpis = kpis or {}
         kpis["states"] = biz["state"].nunique() if "state" in biz.columns else "N/A"
     return kpis
