@@ -166,19 +166,29 @@ with st.sidebar:
 # ── Brand selector ────────────────────────────────────────────────────────
     import pandas as pd
     st.markdown("---")
-    st.markdown("<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>Brands</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:11px;color:#64748b;text-transform:uppercase;"
+                "letter-spacing:0.08em;margin-bottom:6px;'>Brands</div>",
+                unsafe_allow_html=True)
 
     all_brand_options = {b["name"]: b["brand_id"] for b in BRANDS}
 
-    # Only show brands that have data
-    if os.path.exists(BUSINESSES_CSV):
-        try:
-            _biz = pd.read_csv(BUSINESSES_CSV)
-            if "brand_id" in _biz.columns:
-                loaded = _biz["brand_id"].unique().tolist()
-                all_brand_options = {b["name"]: b["brand_id"] for b in BRANDS if b["brand_id"] in loaded}
-        except Exception:
-            pass
+    # Read which brands actually have data — check reviews.csv (covers Zipcar app-only)
+    # and businesses.csv (covers Avis/Budget Google Maps locations)
+    loaded_brand_ids = set()
+    for path in [REVIEWS_CSV, BUSINESSES_CSV]:
+        if os.path.exists(path):
+            try:
+                _df = pd.read_csv(path, usecols=["brand_id"])
+                loaded_brand_ids.update(_df["brand_id"].dropna().unique().tolist())
+            except Exception:
+                pass
+
+    if loaded_brand_ids:
+        all_brand_options = {
+            b["name"]: b["brand_id"]
+            for b in BRANDS
+            if b["brand_id"] in loaded_brand_ids
+        }
 
     if all_brand_options:
         selected_brand_names = st.multiselect(
@@ -187,8 +197,10 @@ with st.sidebar:
             default=list(all_brand_options.keys()),
             label_visibility="collapsed",
         )
-        # Prevent empty selection — fall back to all
+
+        # Prevent empty selection — show warning and revert to all
         if not selected_brand_names:
+            st.warning("⚠️ Select at least one brand.")
             selected_brand_names = list(all_brand_options.keys())
 
         st.session_state["selected_brand_ids"]   = [all_brand_options[n] for n in selected_brand_names]
@@ -197,11 +209,6 @@ with st.sidebar:
         st.caption("No brand data loaded yet.")
         st.session_state["selected_brand_ids"]   = []
         st.session_state["selected_brand_names"] = []
-
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    if not groq_key:
-        st.markdown("---")
-        st.warning("⚠️ Add GROQ_API_KEY to a `.env` file.\nFree key: console.groq.com")
 
 
 def nav_to(page_key: str):
