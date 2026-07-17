@@ -163,34 +163,40 @@ with st.sidebar:
         st.query_params["page"] = selected_key
         st.rerun()
 
-    # ── Brand selector ────────────────────────────────────────────────────────
+# ── Brand selector ────────────────────────────────────────────────────────
     import pandas as pd
     st.markdown("---")
-    st.markdown("<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>Brand</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>Brands</div>", unsafe_allow_html=True)
 
-    brand_options = {b["name"]: b["brand_id"] for b in BRANDS}
+    all_brand_options = {b["name"]: b["brand_id"] for b in BRANDS}
 
-    # Only show brands that actually have data loaded
+    # Only show brands that have data
     if os.path.exists(BUSINESSES_CSV):
         try:
-            loaded_brands = pd.read_csv(BUSINESSES_CSV)["brand_id"].unique().tolist()
-            brand_options = {b["name"]: b["brand_id"] for b in BRANDS if b["brand_id"] in loaded_brands}
+            _biz = pd.read_csv(BUSINESSES_CSV)
+            if "brand_id" in _biz.columns:
+                loaded = _biz["brand_id"].unique().tolist()
+                all_brand_options = {b["name"]: b["brand_id"] for b in BRANDS if b["brand_id"] in loaded}
         except Exception:
             pass
 
-    if brand_options:
-        selected_brand_name = st.radio(
+    if all_brand_options:
+        selected_brand_names = st.multiselect(
             "brand_selector",
-            options=list(brand_options.keys()),
-            index=0,
+            options=list(all_brand_options.keys()),
+            default=list(all_brand_options.keys()),
             label_visibility="collapsed",
         )
-        st.session_state["selected_brand_id"]   = brand_options[selected_brand_name]
-        st.session_state["selected_brand_name"] = selected_brand_name
+        # Prevent empty selection — fall back to all
+        if not selected_brand_names:
+            selected_brand_names = list(all_brand_options.keys())
+
+        st.session_state["selected_brand_ids"]   = [all_brand_options[n] for n in selected_brand_names]
+        st.session_state["selected_brand_names"] = selected_brand_names
     else:
         st.caption("No brand data loaded yet.")
-        st.session_state["selected_brand_id"]   = None
-        st.session_state["selected_brand_name"] = "All"
+        st.session_state["selected_brand_ids"]   = []
+        st.session_state["selected_brand_names"] = []
 
     groq_key = os.environ.get("GROQ_API_KEY", "")
     if not groq_key:
