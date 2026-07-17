@@ -10,7 +10,7 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from config import PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON, BRANDS, BUSINESSES_CSV
+from config import PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON, BRANDS, BUSINESSES_CSV, REVIEWS_CSV
 
 st.set_page_config(
     page_title=PLATFORM_TITLE,
