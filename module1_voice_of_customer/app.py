@@ -34,8 +34,12 @@ def load_data(brand_ids_key: str):
 
 
 def show():
+    from config import BRANDS as _BRANDS
     brand_ids   = st.session_state.get("selected_brand_ids", [])
     brand_names = st.session_state.get("selected_brand_names", ["All Brands"])
+    # Sort brand names by their order in config so label is always Avis, Budget, Zipcar
+    _order = {b["name"]: i for i, b in enumerate(_BRANDS)}
+    brand_names = sorted(brand_names, key=lambda n: _order.get(n, 99))
     brand_label = ", ".join(brand_names) if brand_names else "All Brands"
     cache_key   = ",".join(sorted(brand_ids))
 
@@ -74,7 +78,9 @@ def show():
 
     mask = pd.Series([True] * len(df), index=df.index)
     if sel_states and "state" in df.columns:
-        mask &= df["state"].isin(sel_states)
+        # Keep reviews that match selected states OR have no state (App Store reviews)
+        has_state = df["state"].fillna("").str.strip() != ""
+        mask &= (~has_state) | df["state"].isin(sel_states)
     if len(date_range) == 2 and "date" in df.columns:
         mask &= (df["date"].dt.date >= date_range[0]) & (df["date"].dt.date <= date_range[1])
     if star_filter:
@@ -94,7 +100,7 @@ def show():
     c2.metric("Avg Rating",    f"{filtered['stars'].mean():.2f} ⭐")
     c3.metric("Locations",     filtered[loc_col].nunique() if loc_col else "-")
     c4.metric("States",        filtered["state"].nunique() if "state" in filtered.columns else "-")
-    c5.metric("Brands",        filtered["brand_id"].nunique() if "brand_id" in filtered.columns else len(brand_ids))
+    c5.metric("Brands",        len(brand_ids) if brand_ids else (filtered["brand_id"].nunique() if "brand_id" in filtered.columns else "-"))
 
     # ── Brand + Source breakdown ───────────────────────────────────────────────
     col_l, col_r = st.columns(2)
