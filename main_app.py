@@ -172,7 +172,7 @@ with st.sidebar:
 
     all_brand_options = {b["name"]: b["brand_id"] for b in BRANDS}
 
-    # Read which brands actually have data — check reviews.csv (covers Zipcar app-only)
+    # Read which brands actually have data - check reviews.csv (covers Zipcar app-only)
     # and businesses.csv (covers Avis/Budget Google Maps locations)
     loaded_brand_ids = set()
     for path in [REVIEWS_CSV, BUSINESSES_CSV]:
@@ -198,7 +198,7 @@ with st.sidebar:
             label_visibility="collapsed",
         )
 
-        # Prevent empty selection — show warning and revert to all
+        # Prevent empty selection - show warning and revert to all
         if not selected_brand_names:
             st.warning("⚠️ Select at least one brand.")
             selected_brand_names = list(all_brand_options.keys())
@@ -238,7 +238,7 @@ def load_home_kpis():
         kpis["pct_positive"]  = round((rev["stars"] >= 4).mean() * 100, 1) if len(rev) else 0
         loc_col = "place_name" if "place_name" in rev.columns else (
                   "business_id" if "business_id" in rev.columns else None)
-        kpis["unique_locations"] = rev[loc_col].nunique() if loc_col else "—"
+        kpis["unique_locations"] = rev[loc_col].nunique() if loc_col else "-"
         valid_dates = rev["date"].dropna()
         kpis["date_min"] = valid_dates.min().strftime("%b %Y") if len(valid_dates) else "N/A"
         kpis["date_max"] = valid_dates.max().strftime("%b %Y") if len(valid_dates) else "N/A"
