@@ -53,6 +53,9 @@ def show():
                  "```bash\npython module1_voice_of_customer/01_extract_reviews.py\n```")
         return
 
+    # Save full brand data before any sidebar filtering - used for anomaly detection
+    df_all = df.copy()
+
     # ── Sidebar filters ───────────────────────────────────────────────────────
     st.sidebar.markdown("### Filters")
 
@@ -215,30 +218,45 @@ def show():
     # ── Anomaly detection ─────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### Locations Needing Attention")
-    st.markdown("Locations where recent ratings dropped vs their historical average.")
-    anomalies = detect_anomalies(filtered)
+    st.markdown("Locations rated significantly below the brand average. "
+                "Based on Google Maps reviews (App Store reviews have no location data).")
+    # Use full brand data (not sidebar-filtered) so brand avg is computed on all reviews
+    anomalies = detect_anomalies(df_all)
 
     if anomalies.empty:
         st.success("No significant rating drops detected in the current filter period.")
     else:
-        loc_col_a = "place_name" if "place_name" in filtered.columns else (
-                    "business_id" if "business_id" in filtered.columns else None)
-        if loc_col_a and "city" in filtered.columns and "business_id" in anomalies.columns:
-            info = (filtered[[loc_col_a, "city", "state"]]
+        # Enrich anomalies with city, state, brand_name from full data
+        loc_col_a = "place_name" if "place_name" in df_all.columns else (
+                    "business_id" if "business_id" in df_all.columns else None)
+        if loc_col_a and "business_id" in anomalies.columns:
+            enrich_cols = [c for c in [loc_col_a, "brand_id", "brand_name", "city", "state"]
+                           if c in df_all.columns]
+            info = (df_all[enrich_cols]
                     .drop_duplicates(loc_col_a)
                     .rename(columns={loc_col_a: "business_id"}))
-            anomalies = anomalies.merge(info, on="business_id", how="left")
-        display_cols = [c for c in ["business_id", "city", "state", "historical_avg",
-                                    "recent_avg", "rating_drop", "recent_reviews"]
+            # merge on both business_id and brand_id if available to avoid cross-brand collisions
+            merge_on = ["business_id", "brand_id"] if "brand_id" in anomalies.columns and "brand_id" in info.columns else ["business_id"]
+            anomalies = anomalies.merge(info, on=merge_on, how="left", suffixes=("", "_info"))
+
+        display_cols = [c for c in ["business_id", "brand_name", "city", "state",
+                                    "historical_avg", "recent_avg", "rating_drop", "recent_reviews"]
                         if c in anomalies.columns]
-        shown = anomalies[display_cols].head(10).copy()
+        shown = anomalies[display_cols].head(15).copy()
+        shown = shown.rename(columns={"business_id": "location"})
+        display_cols = [c if c != "business_id" else "location" for c in display_cols]
         for col in ["historical_avg", "recent_avg", "rating_drop"]:
             if col in shown.columns:
                 shown[col] = shown[col].round(2)
         st.dataframe(shown, column_config={
+            "location":       st.column_config.TextColumn("Location"),
+            "brand_name":     st.column_config.TextColumn("Brand"),
+            "city":           st.column_config.TextColumn("City"),
+            "state":          st.column_config.TextColumn("State"),
             "rating_drop":    st.column_config.ProgressColumn("Rating Drop", min_value=0, max_value=2, format="%.2f ⭐"),
             "historical_avg": st.column_config.NumberColumn("Historical Avg ⭐", format="%.2f"),
             "recent_avg":     st.column_config.NumberColumn("Recent Avg ⭐", format="%.2f"),
+            "recent_reviews": st.column_config.NumberColumn("Recent Reviews"),
         }, use_container_width=True, hide_index=True)
 
     # ── Executive Summary ─────────────────────────────────────────────────────
