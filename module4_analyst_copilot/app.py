@@ -100,14 +100,15 @@ def build_context(brand_ids_key: str, brand_label: str):
         worst_text = best_text = "  No location data available"
 
     # Sample low-rating reviews
-    low_df = df[df["stars"] <= 2]["text"].dropna()
-    low_sample = "\n".join([
-        f"- [{row.get('brand_name','') if 'brand_name' in df.columns else ''}] {str(t)[:200]}"
-        for t, row in zip(
-            low_df.sample(min(10, len(low_df)), random_state=42),
-            df.loc[low_df.sample(min(10, len(low_df)), random_state=42).index].itertuples()
-        )
-    ]) if len(low_df) else "No low-rating reviews found."
+    low_df = df[df["stars"] <= 2].dropna(subset=["text"])
+    if len(low_df):
+        low_sample_rows = low_df.sample(min(10, len(low_df)), random_state=42)
+        low_sample = "\n".join([
+            f"- [{row.get('brand_name', '')}] {str(row.get('text', ''))[:200]}"
+            for _, row in low_sample_rows.iterrows()
+        ])
+    else:
+        low_sample = "No low-rating reviews found."
 
     context = f"""CUSTOMER INTELLIGENCE DATA - {brand_label}
 ================================
