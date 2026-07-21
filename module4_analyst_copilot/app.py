@@ -1,5 +1,5 @@
 """
-Module 4 — Analyst Copilot
+Module 4 - Analyst Copilot
 """
 
 import os
@@ -22,7 +22,7 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     if not os.path.exists(REVIEWS_CSV):
         return None, None
 
-    # Reviews already contain city/state/place_name — no merge needed
+    # Reviews already contain city/state/place_name - no merge needed
     df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
 
     if brand_id and "brand_id" in df.columns:
@@ -40,7 +40,7 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     else:
         d_min = d_max = "N/A"
     loc_col = "business_id" if "business_id" in df.columns else "place_name"
-    locs    = df[loc_col].nunique() if loc_col in df.columns else "—"
+    locs    = df[loc_col].nunique() if loc_col in df.columns else "-"
 
     dist = df["stars"].value_counts().sort_index()
     dist_text = ", ".join([f"{int(k)} star: {int(v)} ({v/total*100:.1f}%)" for k,v in dist.items()])
@@ -63,7 +63,7 @@ def build_context(brand_id: str = None, brand_name: str = "All Brands"):
     low_reviews = df[df["stars"]<=2]["text"].dropna().sample(min(10,len(df[df["stars"]<=2])),random_state=42).tolist()
     low_sample  = "\n".join([f"- {r[:200]}" for r in low_reviews])
 
-    context = f"""STORE PERFORMANCE DATA SUMMARY — {brand_name}
+    context = f"""STORE PERFORMANCE DATA SUMMARY - {brand_name}
 ================================
 Total reviews: {total:,}
 Date range: {d_min} to {d_max}
@@ -92,7 +92,7 @@ def show():
     brand_id   = st.session_state.get("selected_brand_id")
     brand_name = st.session_state.get("selected_brand_name", "All Brands")
 
-    st.markdown(f"## Analyst Copilot — {brand_name}")
+    st.markdown(f"## Analyst Copilot - {brand_name}")
     st.markdown(
         "Ask any question about store performance in plain English. "
         "The AI has full context of the dataset and responds with real numbers."
