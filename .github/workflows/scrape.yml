@@ -1,10 +1,10 @@
 name: Scrape Reviews
 on:
-  push:
-    paths:
-      - 'config.py'
-  schedule:
-    - cron: '0 6 * * 1'
+#  push:
+#    paths:
+#      - 'config.py'
+#  schedule:
+#    - cron: '0 6 * * 1'
   workflow_dispatch:
 jobs:
   scrape:
