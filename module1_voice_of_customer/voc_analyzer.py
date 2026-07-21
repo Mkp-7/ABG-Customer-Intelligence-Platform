@@ -1,5 +1,7 @@
 """
-Voice of Customer AI engine — Groq/LLaMA
+Voice of Customer AI engine.
+Uses Groq (free LLM) for theme clustering, anomaly detection,
+sentiment scoring, and executive summary generation.
 """
 
 import os
@@ -18,15 +20,19 @@ def get_groq_client() -> Groq:
         raise ValueError(
             "GROQ_API_KEY not set.\n"
             "1. Get a free key at https://console.groq.com\n"
-            "2. Add it to Streamlit Cloud secrets or a local .env file."
+            "2. Copy .env.example to .env and paste your key."
         )
     return Groq(api_key=api_key)
 
 
-def cluster_themes(reviews_sample: list, client: Groq, industry: str = "car rental") -> dict:
+def cluster_themes(reviews_sample: list, client: Groq, industry: str = "retail") -> dict:
+    """
+    Identify top recurring themes across a sample of review texts.
+    Returns structured JSON with theme names, sentiment, percentage, and example quote.
+    """
     numbered = "\n".join([f"[{i+1}] {r[:300]}" for i, r in enumerate(reviews_sample)])
 
-    prompt = f"""You are analyzing customer reviews for a {industry} company.
+    prompt = f"""You are analyzing customer reviews for a {industry} chain.
 
 Here are {len(reviews_sample)} customer reviews:
 
@@ -75,22 +81,22 @@ Respond ONLY in this JSON format, no other text:
 def detect_anomalies(df: pd.DataFrame, threshold: float = 0.4) -> pd.DataFrame:
     """
     Find locations where the recent 30-day average rating has dropped
-    significantly vs their all-time average.
+    significantly compared to their all-time average.
     """
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
-    df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
-    df = df.dropna(subset=["stars"])
 
     if df.empty:
         return pd.DataFrame()
 
     cutoff = df["date"].max() - pd.Timedelta(days=30)
-    loc_col = "place_name" if "place_name" in df.columns else (
-              "business_id" if "business_id" in df.columns else None)
 
-    if loc_col is None:
+    loc_col = "business_id" if "business_id" in df.columns else "place_name"
+
+    # Drop rows with no location - App Store reviews have empty place_name
+    df = df[df[loc_col].fillna("").str.strip() != ""]
+    if df.empty:
         return pd.DataFrame()
 
     historical = (
@@ -104,9 +110,6 @@ def detect_anomalies(df: pd.DataFrame, threshold: float = 0.4) -> pd.DataFrame:
     if recent_df.empty:
         q80 = df["date"].quantile(0.80)
         recent_df = df[df["date"] >= q80]
-
-    if recent_df.empty:
-        return pd.DataFrame()
 
     recent = (
         recent_df.groupby(loc_col)["stars"]
@@ -128,8 +131,11 @@ def write_exec_summary(
     avg_rating: float,
     date_range: str,
     client: Groq,
-    brand_name: str = "the brand",
+    brand_name: str = "the chain",
 ) -> str:
+    """
+    Generate a ready-to-send executive summary paragraph for leadership.
+    """
     themes_text = ""
     for t in themes[:5]:
         themes_text += f"- {t['name']} ({t['percent']}%, {t['sentiment']}): {t['description']}\n"
@@ -137,7 +143,7 @@ def write_exec_summary(
     anomaly_text = ""
     if not anomaly_stores.empty:
         for _, row in anomaly_stores.head(3).iterrows():
-            loc = row.get("city", row.get("business_id", "Unknown"))
+            loc = f"{row.get('city', row['business_id'])}"
             anomaly_text += (
                 f"- {loc}: rating dropped {row['rating_drop']:.1f} stars "
                 f"(from {row['historical_avg']:.1f} to {row['recent_avg']:.1f})\n"
@@ -173,3 +179,40 @@ Plain business English. No bullet points. No headers. Under 200 words."""
         max_tokens=400,
     )
     return response.choices[0].message.content.strip()
+
+
+def score_sentiment_batch(texts: list, client: Groq) -> list:
+    """
+    Score a batch of review texts as positive / neutral / negative.
+    Returns a list of labels in the same order as input.
+    """
+    numbered = "\n".join([f"[{i+1}] {t[:200]}" for i, t in enumerate(texts)])
+
+    prompt = f"""Rate the sentiment of each review.
+Respond ONLY with a JSON array of strings.
+Each string must be exactly: "positive", "neutral", or "negative"
+Example for 3 reviews: ["positive", "negative", "neutral"]
+
+Reviews:
+{numbered}"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=200,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    try:
+        labels = json.loads(raw)
+        valid = {"positive", "neutral", "negative"}
+        return [l if l in valid else "neutral" for l in labels]
+    except Exception:
+        return ["neutral"] * len(texts)
