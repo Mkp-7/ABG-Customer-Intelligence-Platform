@@ -159,6 +159,10 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
+    if not os.environ.get("HF_TOKEN", ""):
+        st.markdown("---")
+        st.warning("⚠️ Add HF_TOKEN to Streamlit Secrets.\\nFree token: huggingface.co/settings/tokens")
+
     # Sync sidebar selection → query param
     selected_key = [k for k, v in PAGES.items() if v == selected][0]
     if selected_key != cur_page:
