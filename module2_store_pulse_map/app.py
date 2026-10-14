@@ -187,7 +187,7 @@ def show():
             fig.add_trace(go.Scattermap(
                 lat=sub["lat_display"], lon=sub["lon_display"],
                 mode="markers",
-                marker=go.scattermapbox.Marker(size=14, color=color, opacity=0.85),
+                marker=go.scattermap.Marker(size=14, color=color, opacity=0.85),
                 cluster=dict(enabled=True, color=color, size=20, step=3),
                 text=sub["label"],
                 customdata=np.stack([
@@ -223,7 +223,7 @@ def show():
             fig.add_trace(go.Scattermap(
                 lat=sub["lat_display"], lon=sub["lon_display"],
                 mode="markers+text",
-                marker=go.scattermapbox.Marker(size=sub["marker_size"], color=color, opacity=0.88),
+                marker=go.scattermap.Marker(size=sub["marker_size"], color=color, opacity=0.88),
                 text=sub["avg_rating"].round(1).astype(str) + "⭐",
                 textposition="top right",
                 textfont=dict(size=9, color="#333"),
