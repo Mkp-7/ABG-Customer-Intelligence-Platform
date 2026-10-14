@@ -204,8 +204,8 @@ def show():
                 ),
                 name=sub[name_col].iloc[0] if name_col in sub.columns else group_val,
             ))
-        fig.update_layout(mapbox_style="carto-positron", mapbox_zoom=3.5,
-                          mapbox_center={"lat": 37.5, "lon": -96}, height=560,
+        fig.update_layout(map_style="carto-positron", map_zoom=3.5,
+                          map_center={"lat": 37.5, "lon": -96}, height=560,
                           margin=dict(l=0, r=0, t=0, b=0),
                           legend=dict(title="Brand" if multi_brand else "vs State Peers",
                                       bgcolor="rgba(255,255,255,0.9)"))
@@ -244,8 +244,8 @@ def show():
                 ),
                 name=sub[name_col].iloc[0] if name_col in sub.columns else group_val,
             ))
-        fig.update_layout(mapbox_style="carto-positron", mapbox_zoom=3.8,
-                          mapbox_center={"lat": 37.5, "lon": -96}, height=560,
+        fig.update_layout(map_style="carto-positron", map_zoom=3.5,
+                          map_center={"lat": 37.5, "lon": -96}, height=560,
                           margin=dict(l=0, r=0, t=0, b=0),
                           legend=dict(title="Brand" if multi_brand else "vs State Peers",
                                       bgcolor="rgba(255,255,255,0.9)"))
