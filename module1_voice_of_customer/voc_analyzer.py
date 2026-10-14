@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HF_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+HF_MODEL = "microsoft/Phi-3-mini-4k-instruct"
 
 
 def get_client():
