@@ -1,58 +1,55 @@
 """
-Voice of Customer AI engine — Hugging Face Inference API (free)
+Voice of Customer AI engine — Hugging Face (huggingface_hub InferenceClient)
 """
 import os, json
 import pandas as pd
-import requests
+from huggingface_hub import InferenceClient
 from dotenv import load_dotenv
 
 load_dotenv()
 
 HF_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 
 def get_client():
     token = os.environ.get("HF_TOKEN", "")
+    if not token:
+        try:
+            import streamlit as st
+            token = st.secrets.get("HF_TOKEN", "")
+        except Exception:
+            pass
     if not token:
         raise ValueError(
             "HF_TOKEN not set.\n"
             "Get a free token at https://huggingface.co/settings/tokens\n"
             "Add it to Streamlit Secrets: HF_TOKEN = 'hf_...'"
         )
-    return token
+    return InferenceClient(token=token)
 
 def get_groq_client():
     return get_client()
 
 
-def _generate(token: str, prompt: str, max_tokens: int = 800) -> str:
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_tokens,
-            "temperature": 0.3,
-            "return_full_text": False,
-        }
-    }
-    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
-    resp.raise_for_status()
-    result = resp.json()
-    if isinstance(result, list):
-        return result[0].get("generated_text", "").strip()
-    return str(result)
+def _generate(client: InferenceClient, prompt: str, max_tokens: int = 800) -> str:
+    response = client.chat_completion(
+        model=HF_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
 
 
 def cluster_themes(reviews_sample: list, client, industry: str = "retail") -> dict:
     numbered = "\n".join([f"[{i+1}] {r[:300]}" for i, r in enumerate(reviews_sample)])
 
-    prompt = f"""<s>[INST] You are analyzing customer reviews for a {industry} company.
+    prompt = f"""You are analyzing customer reviews for a {industry} company.
 
 Here are {len(reviews_sample)} customer reviews:
 {numbered}
 
-Identify the TOP 6 recurring themes. Respond ONLY in this exact JSON format:
+Identify the TOP 6 recurring themes. Respond ONLY in this exact JSON format, no other text:
 {{
   "themes": [
     {{
@@ -63,8 +60,7 @@ Identify the TOP 6 recurring themes. Respond ONLY in this exact JSON format:
       "example_quote": "under 15 words"
     }}
   ]
-}}
-[/INST]"""
+}}"""
 
     raw = _generate(client, prompt, max_tokens=1000)
     start = raw.find("{")
@@ -128,7 +124,7 @@ def write_exec_summary(themes, anomaly_stores, total_reviews,
     else:
         anomaly_text = "No significant anomalies detected.\n"
 
-    prompt = f"""<s>[INST] Write a concise executive summary (3 short paragraphs, under 200 words) for {brand_name} leadership.
+    prompt = f"""Write a concise executive summary (3 short paragraphs, under 200 words) for {brand_name} leadership.
 
 Data:
 - Period: {date_range}
@@ -141,7 +137,7 @@ Top themes:
 Locations needing attention:
 {anomaly_text}
 
-Plain business English. No bullet points. No headers. [/INST]"""
+Plain business English. No bullet points. No headers."""
 
     return _generate(client, prompt, max_tokens=400)
 
@@ -149,12 +145,13 @@ Plain business English. No bullet points. No headers. [/INST]"""
 def score_sentiment_batch(texts: list, client) -> list:
     numbered = "\n".join([f"[{i+1}] {t[:200]}" for i, t in enumerate(texts)])
 
-    prompt = f"""<s>[INST] Rate the sentiment of each review.
-Respond ONLY with a JSON array: ["positive", "neutral", or "negative"]
+    prompt = f"""Rate the sentiment of each review.
+Respond ONLY with a JSON array of strings, nothing else.
+Each string must be exactly: "positive", "neutral", or "negative"
 Example for 3 reviews: ["positive", "negative", "neutral"]
 
 Reviews:
-{numbered} [/INST]"""
+{numbered}"""
 
     raw = _generate(client, prompt, max_tokens=200)
     start = raw.find("[")
