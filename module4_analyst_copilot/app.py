@@ -14,7 +14,7 @@ sys.path.insert(0, BASE_DIR)
 
 from config import REVIEWS_CSV, BUSINESSES_CSV, PLATFORM_TITLE
 
-HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
+HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
 
 
 def get_token():
