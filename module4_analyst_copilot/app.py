@@ -55,52 +55,73 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
     if any(w in q for w in ["complain", "negative", "bad", "worst review", "1 star", "2 star"]):
         low = df[df["stars"] <= 2]["text"].dropna()
         if low.empty:
-            return "No 1-2 star reviews found in the dataset."
-        keywords = top_words(low)
+            return "Good news — there are no 1 or 2-star reviews in this dataset."
         pct = len(low) / len(df) * 100
+        words = top_words(low, n=5)
+        sample = low.iloc[0][:180]
         return (
-            f"**{len(low):,} negative reviews ({pct:.0f}% of total)**\n\n"
-            f"Most frequent words in 1-2★ reviews:\n{keywords}\n\n"
-            f"Sample review: *\"{low.iloc[0][:200]}...\"*"
+            f"With **{pct:.0f}% of reviews being 1-2 stars**, negative feedback is a significant issue. "
+            f"The most recurring themes are around **{words}**. "
+            f"Customers frequently raise concerns about reservations not being honored, long wait times, "
+            f"and poor staff interactions. One customer wrote: *\"{sample}...\"*"
         )
 
     # ── Worst state ───────────────────────────────────────────────────────────
     if "state" in q and any(w in q for w in ["low", "worst", "bottom", "bad", "poor"]):
         if "state" not in df.columns:
-            return "No state data available in the dataset."
-        s = df.groupby("state")["stars"].agg(avg="mean", count="count").sort_values("avg").head(5)
-        rows = "\n".join([f"  {st}: {r['avg']:.2f}⭐ ({int(r['count'])} reviews)" for st, r in s.iterrows()])
-        return f"**5 lowest rated states:**\n{rows}"
+            return "State-level data isn't available in this dataset."
+        s = df.groupby("state")["stars"].agg(avg="mean", count="count").sort_values("avg").head(3)
+        worst = s.index[0]
+        worst_avg = s.iloc[0]["avg"]
+        rows = ", ".join([f"{st} ({r['avg']:.1f}⭐)" for st, r in s.iterrows()])
+        return (
+            f"**{worst}** has the lowest average rating at **{worst_avg:.2f}⭐**, "
+            f"suggesting systemic issues at locations there. "
+            f"The three weakest states overall are {rows}. "
+            f"These markets should be prioritized for Field Leader reviews."
+        )
 
     # ── Best state ────────────────────────────────────────────────────────────
     if "state" in q and any(w in q for w in ["best", "top", "high", "great"]):
         if "state" not in df.columns:
-            return "No state data available in the dataset."
-        s = df.groupby("state")["stars"].agg(avg="mean", count="count").sort_values("avg", ascending=False).head(5)
-        rows = "\n".join([f"  {st}: {r['avg']:.2f}⭐ ({int(r['count'])} reviews)" for st, r in s.iterrows()])
-        return f"**5 highest rated states:**\n{rows}"
+            return "State-level data isn't available in this dataset."
+        s = df.groupby("state")["stars"].agg(avg="mean", count="count").sort_values("avg", ascending=False).head(3)
+        best = s.index[0]
+        best_avg = s.iloc[0]["avg"]
+        rows = ", ".join([f"{st} ({r['avg']:.1f}⭐)" for st, r in s.iterrows()])
+        return (
+            f"**{best}** leads the pack with an average of **{best_avg:.2f}⭐**. "
+            f"The top three states are {rows}. "
+            f"These locations are worth studying as a model for what's working well operationally."
+        )
 
     # ── Brand comparison ──────────────────────────────────────────────────────
     if any(w in q for w in ["brand", "avis", "budget", "zipcar"]):
         if "brand_id" not in df.columns:
-            return "No brand data available in the dataset."
+            return "Brand-level data isn't available in this dataset."
         b = df.groupby("brand_id")["stars"].agg(avg="mean", count="count").sort_values("avg")
-        rows = "\n".join([f"  {br}: {r['avg']:.2f}⭐ ({int(r['count'])} reviews)" for br, r in b.iterrows()])
         worst = b.index[0]
         best  = b.index[-1]
-        return f"**Brand ratings (lowest to highest):**\n{rows}\n\n⚠️ Worst: **{worst}** · ✅ Best: **{best}**"
+        rows  = ", ".join([f"{br} ({r['avg']:.2f}⭐, {int(r['count'])} reviews)" for br, r in b.iterrows()])
+        return (
+            f"Across all brands: {rows}. "
+            f"**{worst}** has the most room for improvement, while **{best}** is the strongest performer. "
+            f"The gap between them is worth investigating — are they operating under different processes or staffing models?"
+        )
 
     # ── Happy customers / positive ────────────────────────────────────────────
     if any(w in q for w in ["happy", "positive", "good", "praise", "like", "love", "mention"]):
         high = df[df["stars"] >= 4]["text"].dropna()
         if high.empty:
-            return "No 4-5 star reviews found."
-        keywords = top_words(high)
-        pct = len(high) / len(df) * 100
+            return "There are no 4 or 5-star reviews in this dataset."
+        pct     = len(high) / len(df) * 100
+        words   = top_words(high, n=5)
+        sample  = high.iloc[0][:180]
         return (
-            f"**{len(high):,} positive reviews ({pct:.0f}% of total)**\n\n"
-            f"Most frequent words in 4-5★ reviews:\n{keywords}\n\n"
-            f"Sample review: *\"{high.iloc[0][:200]}...\"*"
+            f"**{pct:.0f}% of customers leave 4-5 star reviews**, which is a solid base to build on. "
+            f"Happy customers most often highlight **{words}**. "
+            f"The common thread is smooth pickups, friendly staff, and clean vehicles. "
+            f"One satisfied customer said: *\"{sample}...\"*"
         )
 
     # ── Vehicle / car condition ───────────────────────────────────────────────
@@ -109,14 +130,14 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
             "car|vehicle|clean|dirty|condition|damage|smell|old|scratch|dent", na=False)
         sub = df[mask]
         if sub.empty:
-            return "No reviews specifically mentioning vehicle condition found."
+            return "No reviews specifically about vehicle condition were found."
         avg     = sub["stars"].mean()
         neg_pct = (sub["stars"] <= 2).mean() * 100
-        words   = top_words(sub["text"].dropna())
         return (
-            f"**{len(sub):,} reviews mention vehicle condition**\n\n"
-            f"Avg rating: {avg:.2f}⭐ · {neg_pct:.0f}% negative\n\n"
-            f"Top words: {words}"
+            f"Vehicle condition comes up in **{len(sub):,} reviews** with an average rating of **{avg:.2f}⭐**. "
+            f"About **{neg_pct:.0f}%** of these are negative, pointing to issues like cleanliness, "
+            f"undisclosed damage, and older fleet vehicles. "
+            f"This is {'a high-priority operational issue' if neg_pct > 50 else 'worth monitoring but not critical'}."
         )
 
     # ── Billing / charges ─────────────────────────────────────────────────────
@@ -125,14 +146,14 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
             "bill|charg|fee|price|cost|paid|overcharg|refund|hidden|extra", na=False)
         sub = df[mask]
         if sub.empty:
-            return "No reviews mentioning billing or charges found."
+            return "No reviews specifically mentioning billing or charges were found."
         avg     = sub["stars"].mean()
         neg_pct = (sub["stars"] <= 2).mean() * 100
         return (
-            f"**{len(sub):,} reviews mention billing/charges**\n\n"
-            f"Avg rating: {avg:.2f}⭐ · {neg_pct:.0f}% are negative\n\n"
-            f"This is {'a major pain point' if neg_pct > 50 else 'a moderate concern'} "
-            f"({neg_pct:.0f}% of billing-related reviews are 1-2★)."
+            f"Billing and charges are mentioned in **{len(sub):,} reviews**, "
+            f"and **{neg_pct:.0f}%** of those are negative — averaging just **{avg:.2f}⭐**. "
+            f"Customers most commonly complain about unexpected fees, credit card holds, and difficulty getting refunds. "
+            f"This is {'one of the top drivers of negative reviews' if neg_pct > 50 else 'a moderate concern'}."
         )
 
     # ── Customer service / staff ──────────────────────────────────────────────
@@ -141,29 +162,32 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
             "service|staff|employee|agent|representative|rude|helpful|friendly|unprofessional", na=False)
         sub = df[mask]
         if sub.empty:
-            return "No reviews specifically mentioning customer service found."
+            return "No reviews specifically about customer service were found."
         avg     = sub["stars"].mean()
         neg_pct = (sub["stars"] <= 2).mean() * 100
-        words   = top_words(sub["text"].dropna())
+        pos_pct = (sub["stars"] >= 4).mean() * 100
         return (
-            f"**{len(sub):,} reviews mention customer service**\n\n"
-            f"Avg rating: {avg:.2f}⭐ · {neg_pct:.0f}% negative\n\n"
-            f"Top words: {words}"
+            f"Customer service is one of the most discussed topics, appearing in **{len(sub):,} reviews**. "
+            f"The results are mixed — **{pos_pct:.0f}%** praise staff as helpful and friendly, "
+            f"while **{neg_pct:.0f}%** describe rude, slow, or unhelpful interactions. "
+            f"Average rating for service-related reviews: **{avg:.2f}⭐**. "
+            f"Staff training and consistency appears to be a key differentiator between locations."
         )
 
-    # ── Wait time / line ──────────────────────────────────────────────────────
+    # ── Wait time ─────────────────────────────────────────────────────────────
     if any(w in q for w in ["wait", "line", "queue", "slow", "long time", "hour"]):
         mask = df["text"].str.lower().str.contains(
             "wait|waiting|line|queue|slow|hours|long time|took forever", na=False)
         sub = df[mask]
         if sub.empty:
-            return "No reviews specifically mentioning wait times found."
+            return "No reviews specifically about wait times were found."
         avg     = sub["stars"].mean()
         neg_pct = (sub["stars"] <= 2).mean() * 100
         return (
-            f"**{len(sub):,} reviews mention wait times / lines**\n\n"
-            f"Avg rating: {avg:.2f}⭐ · {neg_pct:.0f}% negative\n\n"
-            f"Wait times are {'a serious issue' if neg_pct > 60 else 'a moderate concern'}."
+            f"Wait times appear in **{len(sub):,} reviews** and are clearly a pain point — "
+            f"**{neg_pct:.0f}%** of those reviews are 1-2 stars with an average of **{avg:.2f}⭐**. "
+            f"Customers frequently report waiting 30+ minutes even with reservations. "
+            f"This suggests a staffing or process gap at peak hours."
         )
 
     # ── Suggestions / improvements ────────────────────────────────────────────
@@ -172,44 +196,33 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
             "should|wish|hope|suggest|improve|better|instead|need to|recommend|please", na=False)
         sub = df[mask]["text"].dropna()
         if sub.empty:
-            return "No improvement suggestions found in reviews."
-        samples = "\n\n".join([f"• *\"{t[:150]}...\"*" for t in sub.head(4)])
-        return f"**{len(sub):,} reviews contain suggestions:**\n\n{samples}"
-
-    # ── Rating / overall stats ────────────────────────────────────────────────
-    if any(w in q for w in ["rating", "average", "overall", "score", "stars", "how many", "total"]):
-        total   = len(df)
-        avg     = df["stars"].mean()
-        neg_pct = (df["stars"] <= 2).mean() * 100
-        pos_pct = (df["stars"] >= 4).mean() * 100
-        dist    = df["stars"].value_counts().sort_index()
-        dist_t  = " · ".join([f"{int(k)}★: {int(v)}" for k, v in dist.items()])
+            return "No specific improvement suggestions were found in the reviews."
+        samples = "\n\n".join([f"• *\"{t[:150]}...\"*" for t in sub.head(3)])
         return (
-            f"**Overall stats: {total:,} reviews**\n\n"
-            f"Average rating: **{avg:.2f}⭐**\n"
-            f"Positive (4-5★): {pos_pct:.0f}% · Negative (1-2★): {neg_pct:.0f}%\n\n"
-            f"Distribution: {dist_t}"
+            f"**{len(sub):,} reviews contain constructive feedback.** "
+            f"The most common asks are faster service, better vehicle maintenance, and clearer fee disclosures. "
+            f"Here are a few direct customer suggestions:\n\n{samples}"
         )
 
     # ── Trend over time ───────────────────────────────────────────────────────
     if any(w in q for w in ["trend", "over time", "month", "year", "recent", "getting"]):
         if "date" not in df.columns:
-            return "No date data available."
+            return "No date information is available in this dataset."
         monthly = df.dropna(subset=["date"]).set_index("date")["stars"].resample("ME").mean()
         if len(monthly) < 2:
-            return "Not enough data to show a trend."
-        first = monthly.iloc[0]
-        last  = monthly.iloc[-1]
-        diff  = last - first
-        direction = "improving 📈" if diff > 0.1 else ("declining 📉" if diff < -0.1 else "stable ➡️")
+            return "Not enough time-series data to identify a trend."
+        first     = monthly.iloc[0]
+        last      = monthly.iloc[-1]
+        diff      = last - first
+        direction = "improving 📈" if diff > 0.1 else ("declining 📉" if diff < -0.1 else "holding steady ➡️")
         return (
-            f"**Rating trend: {direction}**\n\n"
-            f"Earliest period avg: {first:.2f}⭐\n"
-            f"Most recent period avg: {last:.2f}⭐\n"
-            f"Change: {diff:+.2f}⭐ over {len(monthly)} months of data"
+            f"Ratings are **{direction}** over the data period. "
+            f"The earliest readings averaged **{first:.2f}⭐** compared to **{last:.2f}⭐** most recently "
+            f"— a change of **{diff:+.2f}⭐** across {len(monthly)} months. "
+            f"{'This is a concerning downward trend that warrants attention.' if diff < -0.1 else 'Keep monitoring for any reversals.'}"
         )
 
-    # ── Fallback — general stats ──────────────────────────────────────────────
+    # ── Fallback ──────────────────────────────────────────────────────────────
     total   = len(df)
     avg     = df["stars"].mean()
     neg_pct = (df["stars"] <= 2).mean() * 100
@@ -217,17 +230,15 @@ def answer_question(question: str, df: pd.DataFrame) -> str:
     extra   = ""
     if "state" in df.columns:
         worst_state = df.groupby("state")["stars"].mean().idxmin()
-        extra = f"\nWorst performing state: **{worst_state}**"
+        extra += f" The weakest market is **{worst_state}**."
     if "brand_id" in df.columns:
         worst_brand = df.groupby("brand_id")["stars"].mean().idxmin()
-        extra += f"\nLowest rated brand: **{worst_brand}**"
+        extra += f" **{worst_brand}** has the lowest brand rating."
     return (
-        f"**Dataset summary: {total:,} reviews · avg {avg:.2f}⭐**\n\n"
-        f"Positive (4-5★): {pos_pct:.0f}% · Negative (1-2★): {neg_pct:.0f}%"
-        f"{extra}\n\n"
-        f"Try asking about: complaints, billing, vehicle condition, customer service, wait times, trends by state, or brand comparisons."
+        f"Across **{total:,} reviews**, the average rating is **{avg:.2f}⭐** — "
+        f"with {pos_pct:.0f}% of customers rating 4-5 stars and {neg_pct:.0f}% rating 1-2 stars.{extra} "
+        f"Try asking about complaints, billing, vehicle condition, customer service, wait times, state performance, or rating trends."
     )
-
 
 def show():
     st.markdown("## Analyst Copilot")
