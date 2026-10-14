@@ -184,7 +184,7 @@ def show():
         for group_val, color in color_map.items():
             sub = filtered[filtered[group_col] == group_val]
             if sub.empty: continue
-            fig.add_trace(go.Scattermapbox(
+            fig.add_trace(go.Scattermap(
                 lat=sub["lat_display"], lon=sub["lon_display"],
                 mode="markers",
                 marker=go.scattermapbox.Marker(size=14, color=color, opacity=0.85),
@@ -220,7 +220,7 @@ def show():
         for group_val, color in color_map.items():
             sub = filtered[filtered[group_col] == group_val]
             if sub.empty: continue
-            fig.add_trace(go.Scattermapbox(
+            fig.add_trace(go.Scattermap(
                 lat=sub["lat_display"], lon=sub["lon_display"],
                 mode="markers+text",
                 marker=go.scattermapbox.Marker(size=sub["marker_size"], color=color, opacity=0.88),
