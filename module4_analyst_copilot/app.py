@@ -1,10 +1,11 @@
-"""
+    """
 Module 4 — Analyst Copilot with RAG (HuggingFace + GitHub CSV)
 """
-import os, sys, requests
+import os, sys
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
 
 load_dotenv()
 
@@ -14,14 +15,18 @@ sys.path.insert(0, BASE_DIR)
 from config import REVIEWS_CSV, BUSINESSES_CSV, PLATFORM_TITLE
 
 HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 
 def get_token():
-    token = os.environ.get("HF_TOKEN", st.secrets.get("HF_TOKEN", ""))
+    token = os.environ.get("HF_TOKEN", "")
+    if not token:
+        try:
+            token = st.secrets.get("HF_TOKEN", "")
+        except Exception:
+            pass
     if not token:
         raise ValueError("HF_TOKEN not set in Streamlit Secrets.")
-    return token
+    return InferenceClient(token=token)
 
 
 @st.cache_data(show_spinner=False)
@@ -85,14 +90,14 @@ def build_stats(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def ask_hf(question: str, reviews_df: pd.DataFrame, stats: str, token: str) -> str:
+def ask_hf(question: str, reviews_df: pd.DataFrame, stats: str, client) -> str:
     relevant = retrieve_relevant(reviews_df, question, n=150)
     sample   = "\n".join([
         f"[{i+1}] ({int(r['stars'])}★ {str(r.get('date',''))[:7]}) {str(r['text'])[:250]}"
         for i, (_, r) in enumerate(relevant.iterrows())
     ])
 
-    prompt = f"""<s>[INST] You are a retail analytics expert analyzing customer reviews for a car rental company (Avis, Budget, Zipcar).
+    prompt = f"""You are a retail analytics expert analyzing customer reviews for a car rental company (Avis, Budget, Zipcar).
 
 DATASET STATS:
 {stats}
@@ -102,20 +107,15 @@ RELEVANT REVIEWS ({len(relevant)} retrieved for this question):
 
 QUESTION: {question}
 
-Answer using the data above. Be specific, use numbers, keep it under 200 words. [/INST]"""
+Answer using the data above. Be specific, use numbers, keep it under 200 words."""
 
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {"max_new_tokens": 500, "temperature": 0.3, "return_full_text": False}
-    }
-    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=90)
-    resp.raise_for_status()
-    result = resp.json()
-    if isinstance(result, list):
-        return result[0].get("generated_text", "").strip()
-    return str(result)
-
+    response = client.chat_completion(
+        model=HF_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
 
 def show():
     st.markdown("## Analyst Copilot")
