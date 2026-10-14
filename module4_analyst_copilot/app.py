@@ -29,10 +29,11 @@ def load_data():
     if not os.path.exists(REVIEWS_CSV):
         return None
     df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
-    if os.path.exists(BUSINESSES_CSV):
+    if os.path.exists(BUSINESSES_CSV) and "business_id" in df.columns:
         biz = pd.read_csv(BUSINESSES_CSV)
-        cols = [c for c in ["business_id","name","city","state"] if c in biz.columns]
-        df = df.merge(biz[cols], on="business_id", how="left")
+        if "business_id" in biz.columns:
+            cols = [c for c in ["business_id","name","city","state"] if c in biz.columns]
+            df = df.merge(biz[cols], on="business_id", how="left")
     df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
     df = df.dropna(subset=["stars", "text"])
     return df
