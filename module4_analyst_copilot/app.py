@@ -1,9 +1,7 @@
 """
-Module 4 - Analyst Copilot
+Module 4 — Analyst Copilot with RAG (HuggingFace + GitHub CSV)
 """
-
-import os
-import sys
+import os, sys, requests
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -11,223 +9,179 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MOD_DIR  = os.path.join(BASE_DIR, "module1_voice_of_customer")
 sys.path.insert(0, BASE_DIR)
-sys.path.insert(0, MOD_DIR)
 
-from config import REVIEWS_CSV, GROQ_MODEL
-from voc_analyzer import get_groq_client
+from config import REVIEWS_CSV, BUSINESSES_CSV, PLATFORM_TITLE
+
+HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+
+def get_token():
+    token = os.environ.get("HF_TOKEN", st.secrets.get("HF_TOKEN", ""))
+    if not token:
+        raise ValueError("HF_TOKEN not set in Streamlit Secrets.")
+    return token
 
 
 @st.cache_data(show_spinner=False)
-def build_context(brand_ids_key: str, brand_label: str):
-    """brand_ids_key is comma-joined sorted brand_ids for cache invalidation."""
+def load_data():
     if not os.path.exists(REVIEWS_CSV):
-        return None, None
-
+        return None
     df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+    if os.path.exists(BUSINESSES_CSV):
+        biz = pd.read_csv(BUSINESSES_CSV)
+        cols = [c for c in ["business_id","name","city","state"] if c in biz.columns]
+        df = df.merge(biz[cols], on="business_id", how="left")
     df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
-    df = df.dropna(subset=["stars"])
+    df = df.dropna(subset=["stars", "text"])
+    return df
 
-    brand_ids = [b for b in brand_ids_key.split(",") if b]
-    if brand_ids and "brand_id" in df.columns:
-        df = df[df["brand_id"].isin(brand_ids)]
 
-    if df.empty:
-        return None, None
+def retrieve_relevant(df: pd.DataFrame, question: str, n: int = 150) -> pd.DataFrame:
+    """Keyword-based retrieval — finds reviews most relevant to the question."""
+    q_lower = question.lower()
+    keywords = [w for w in q_lower.split() if len(w) > 3
+                and w not in {"what","which","where","when","how","are","the","for","does","have","been","that","with","from"}]
 
-    total = len(df)
-    avg   = df["stars"].mean()
+    if not keywords:
+        return df.sample(min(n, len(df)), random_state=42)
 
-    valid_dates = df["date"].dropna()
-    d_min = valid_dates.min().strftime("%Y-%m-%d") if len(valid_dates) else "N/A"
-    d_max = valid_dates.max().strftime("%Y-%m-%d") if len(valid_dates) else "N/A"
+    scores = pd.Series(0, index=df.index)
+    for kw in keywords:
+        scores += df["text"].str.lower().str.contains(kw, na=False).astype(int)
 
-    loc_col = "place_name" if "place_name" in df.columns else (
-              "business_id" if "business_id" in df.columns else None)
-    locs = df[loc_col].nunique() if loc_col else "-"
+    # Mix: top scored + random low-scorers for diversity
+    top = df[scores > 0].nlargest(min(n, len(df)), scores.reindex(df[scores > 0].index))
+    if len(top) < n:
+        remaining = df[scores == 0].sample(min(n - len(top), len(df[scores == 0])), random_state=42)
+        top = pd.concat([top, remaining])
 
-    # Rating distribution
-    dist = df["stars"].value_counts().sort_index()
-    dist_text = ", ".join([f"{int(k)} star: {int(v)} ({v/total*100:.1f}%)"
-                           for k, v in dist.items()])
+    return top.head(n)
 
-    # Per-brand summary
-    brand_text = ""
-    if "brand_name" in df.columns and df["brand_name"].nunique() > 1:
-        for brand, grp in df.groupby("brand_name"):
-            b_avg = grp["stars"].mean()
-            b_neg = (grp["stars"] <= 2).mean() * 100
-            b_pos = (grp["stars"] >= 4).mean() * 100
-            brand_text += (f"  {brand}: {len(grp):,} reviews, avg {b_avg:.2f}⭐, "
-                           f"{b_neg:.1f}% negative, {b_pos:.1f}% positive\n")
-    else:
-        brand_text = "  (single brand selected)\n"
 
-    # State performance - only for reviews with state data
-    df_loc = df[df["state"].fillna("").str.strip() != ""] if "state" in df.columns else df
-    if not df_loc.empty and "state" in df_loc.columns:
-        state_stats = (df_loc.groupby("state")["stars"]
-                       .agg(avg="mean", count="count")
-                       .sort_values("avg")
-                       .reset_index())
-        state_text = "\n".join([f"  {r['state']}: avg={r['avg']:.2f}, n={r['count']}"
-                                 for _, r in state_stats.iterrows()])
-    else:
-        state_text = "  No state data available (App Store reviews have no location)"
+def build_stats(df: pd.DataFrame) -> str:
+    total  = len(df)
+    avg    = df["stars"].mean()
+    dist   = df["stars"].value_counts().sort_index()
+    dist_t = ", ".join([f"{int(k)}★: {int(v)} ({v/total*100:.0f}%)" for k,v in dist.items()])
 
-    # Worst / best locations (Google Maps only)
-    if loc_col and not df_loc.empty:
-        store_agg = (df_loc.groupby(loc_col)
-                     .agg(avg_stars=("stars", "mean"), n=("stars", "count"),
-                          city=("city", "first"), state=("state", "first"),
-                          brand=("brand_name", "first"))
-                     .reset_index())
-        store_agg = store_agg[store_agg["n"] >= 2]
+    lines = [
+        f"Total reviews: {total:,}",
+        f"Average rating: {avg:.2f}/5.0",
+        f"Rating distribution: {dist_t}",
+    ]
 
-        worst = store_agg.nsmallest(5, "avg_stars")
-        worst_text = "\n".join([
-            f"  {r['brand']} - {r['city']}, {r['state']}: {r['avg_stars']:.2f}⭐ ({r['n']} reviews)"
-            for _, r in worst.iterrows()
-        ])
+    if "state" in df.columns:
+        state_avg = df.groupby("state")["stars"].mean().sort_values()
+        lines.append(f"Worst state: {state_avg.index[0]} ({state_avg.iloc[0]:.2f}★)")
+        lines.append(f"Best state: {state_avg.index[-1]} ({state_avg.iloc[-1]:.2f}★)")
 
-        best = store_agg.nlargest(5, "avg_stars")
-        best_text = "\n".join([
-            f"  {r['brand']} - {r['city']}, {r['state']}: {r['avg_stars']:.2f}⭐ ({r['n']} reviews)"
-            for _, r in best.iterrows()
-        ])
-    else:
-        worst_text = best_text = "  No location data available"
+    if "brand_id" in df.columns:
+        brand_avg = df.groupby("brand_id")["stars"].mean().sort_values()
+        lines.append("Brand ratings: " + ", ".join([f"{b}: {v:.2f}★" for b,v in brand_avg.items()]))
 
-    # Sample low-rating reviews
-    low_df = df[df["stars"] <= 2].dropna(subset=["text"])
-    if len(low_df):
-        low_sample_rows = low_df.sample(min(10, len(low_df)), random_state=42)
-        low_sample = "\n".join([
-            f"- [{row.get('brand_name', '')}] {str(row.get('text', ''))[:200]}"
-            for _, row in low_sample_rows.iterrows()
-        ])
-    else:
-        low_sample = "No low-rating reviews found."
+    return "\n".join(lines)
 
-    context = f"""CUSTOMER INTELLIGENCE DATA - {brand_label}
-================================
-Total reviews: {total:,}
-Date range: {d_min} to {d_max}
-Average rating: {avg:.2f} / 5.0
-Locations covered: {locs}
 
-RATING DISTRIBUTION:
-{dist_text}
+def ask_hf(question: str, reviews_df: pd.DataFrame, stats: str, token: str) -> str:
+    relevant = retrieve_relevant(reviews_df, question, n=150)
+    sample   = "\n".join([
+        f"[{i+1}] ({int(r['stars'])}★ {str(r.get('date',''))[:7]}) {str(r['text'])[:250]}"
+        for i, (_, r) in enumerate(relevant.iterrows())
+    ])
 
-PER-BRAND BREAKDOWN:
-{brand_text}
-PERFORMANCE BY STATE (Google Maps reviews):
-{state_text}
+    prompt = f"""<s>[INST] You are a retail analytics expert analyzing customer reviews for a car rental company (Avis, Budget, Zipcar).
 
-WORST 5 LOCATIONS:
-{worst_text}
+DATASET STATS:
+{stats}
 
-BEST 5 LOCATIONS:
-{best_text}
+RELEVANT REVIEWS ({len(relevant)} retrieved for this question):
+{sample}
 
-SAMPLE LOW-RATING REVIEWS (1-2 stars):
-{low_sample}
-"""
-    return context, df
+QUESTION: {question}
+
+Answer using the data above. Be specific, use numbers, keep it under 200 words. [/INST]"""
+
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {"max_new_tokens": 500, "temperature": 0.3, "return_full_text": False}
+    }
+    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=90)
+    resp.raise_for_status()
+    result = resp.json()
+    if isinstance(result, list):
+        return result[0].get("generated_text", "").strip()
+    return str(result)
 
 
 def show():
-    from config import BRANDS as _BRANDS
-    brand_ids   = st.session_state.get("selected_brand_ids", [])
-    brand_names = st.session_state.get("selected_brand_names", ["All Brands"])
-    _order      = {b["name"]: i for i, b in enumerate(_BRANDS)}
-    brand_names = sorted(brand_names, key=lambda n: _order.get(n, 99))
-    brand_label = ", ".join(brand_names) if brand_names else "All Brands"
-    cache_key   = ",".join(sorted(brand_ids))
+    st.markdown("## Analyst Copilot")
+    st.markdown("Ask any question about customer reviews in plain English. AI retrieves the most relevant reviews and answers with real data.")
 
-    st.markdown(f"## 🤖 Analyst Copilot - {brand_label}")
-    st.markdown(
-        "Ask any question about store performance in plain English. "
-        "The AI has full context of the dataset and responds with real numbers."
-    )
+    with st.spinner("Loading data..."):
+        df = load_data()
 
-    with st.spinner("Preparing data context..."):
-        context, df = build_context(cache_key, brand_label)
-
-    if context is None:
-        st.error("No data found. Run the extractor first:\n"
-                 "```bash\npython module1_voice_of_customer/01_extract_reviews.py\n```")
+    if df is None:
+        st.error("No data found. Run the extractor first.")
         return
 
     try:
-        client = get_groq_client()
+        token = get_token()
     except ValueError as e:
         st.error(str(e))
         return
 
+    stats = build_stats(df)
+
     st.markdown("### Try asking:")
     questions = [
-        "Which brand has the lowest ratings?",
         "What do customers complain about most?",
-        "Which states have the worst performance?",
-        "Compare Avis vs Budget ratings",
-        "How many locations are below 3 stars?",
-        "What do happy customers mention most?",
-        "Which cities have the best performance?",
-        "Is there a trend in ratings over time?",
+        "Which brand has the worst ratings?",
+        "What do happy customers mention?",
+        "What are common complaints about vehicle condition?",
+        "Which states have the lowest ratings?",
+        "What do customers say about customer service?",
+        "Are there complaints about billing or charges?",
+        "What improvements do customers suggest?",
     ]
     cols = st.columns(4)
     for i, q in enumerate(questions):
         if cols[i % 4].button(q, key=f"q{i}"):
-            st.session_state["copilot_pending"] = q
+            st.session_state["pending"] = q
 
     st.markdown("---")
 
-    if "copilot_history" not in st.session_state:
-        st.session_state["copilot_history"] = []
+    if "history" not in st.session_state:
+        st.session_state["history"] = []
 
-    for msg in st.session_state["copilot_history"]:
+    for msg in st.session_state["history"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    pending  = st.session_state.pop("copilot_pending", "")
-    user_in  = st.chat_input("Ask anything about store performance...")
+    pending  = st.session_state.pop("pending", "")
+    user_in  = st.chat_input("Ask anything about customer reviews...")
     question = user_in or pending
 
     if question:
         with st.chat_message("user"):
             st.markdown(question)
-        st.session_state["copilot_history"].append({"role": "user", "content": question})
-
-        system = f"""You are an expert retail data analyst with access to the following data:
-
-{context}
-
-Answer using ONLY the data above. Be direct and specific. Use numbers.
-When multiple brands are present, compare them. Under 150 words unless asked for detail."""
-
-        msgs = [{"role": "system", "content": system}]
-        msgs += [{"role": m["role"], "content": m["content"]}
-                 for m in st.session_state["copilot_history"][-6:]]
+        st.session_state["history"].append({"role": "user", "content": question})
 
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
-                resp = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=msgs,
-                    temperature=0.3,
-                    max_tokens=500,
-                )
-                answer = resp.choices[0].message.content.strip()
-                st.markdown(answer)
+            with st.spinner("Retrieving relevant reviews and analyzing..."):
+                try:
+                    answer = ask_hf(question, df, stats, token)
+                    st.markdown(answer)
+                    st.session_state["history"].append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-        st.session_state["copilot_history"].append({"role": "assistant", "content": answer})
-
-    if st.session_state.get("copilot_history"):
+    if st.session_state.get("history"):
         if st.button("Clear conversation"):
-            st.session_state["copilot_history"] = []
+            st.session_state["history"] = []
             st.rerun()
 
-    with st.expander("View data context the AI uses"):
-        st.code(context, language="text")
+    with st.expander("Dataset stats the AI uses"):
+        st.code(stats, language="text")
