@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HF_MODEL = "microsoft/Phi-3-mini-4k-instruct"
+HF_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
 
 
 def get_client():
