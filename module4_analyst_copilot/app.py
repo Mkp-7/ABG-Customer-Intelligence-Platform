@@ -1,4 +1,4 @@
-    """
+"""
 Module 4 — Analyst Copilot with RAG (HuggingFace + GitHub CSV)
 """
 import os, sys
