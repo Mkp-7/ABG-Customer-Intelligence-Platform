@@ -10,7 +10,9 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from config import PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON, BRANDS, BUSINESSES_CSV, REVIEWS_CSV
+from config import PLATFORM_TITLE, PLATFORM_SUBTITLE, PLATFORM_ICON, TARGET_BUSINESS_NAMES, BUSINESSES_CSV, REVIEWS_CSV
+
+BRANDS = [{"brand_id": n.lower(), "name": n} for n in TARGET_BUSINESS_NAMES]
 
 st.set_page_config(
     page_title=PLATFORM_TITLE,
