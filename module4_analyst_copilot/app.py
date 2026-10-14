@@ -14,7 +14,7 @@ sys.path.insert(0, BASE_DIR)
 
 from config import REVIEWS_CSV, BUSINESSES_CSV, PLATFORM_TITLE
 
-HF_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 
 
 def get_token():
